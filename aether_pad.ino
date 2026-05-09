@@ -114,6 +114,13 @@ const unsigned long LONG_PRESS_MS = 600;   // touch-hold duration that triggers 
 // dependence (tested 2026-05-08: straight key over WiFi was unusable).
 const int  KEY_PIN_DIT = 5;     // paddle ring → D5 (INPUT_PULLUP, closes to GND)
 const int  KEY_PIN_DAH = 4;     // paddle tip  → D4 (INPUT_PULLUP, closes to GND)
+const int  KEY_PIN_OUT = 6;     // hardware key output → D6 (active HIGH)
+                                // Wire D6 to a 2N3904 base via 1 kΩ, emitter to GND,
+                                // collector to the radio's CW key jack tip.  D6 HIGH
+                                // saturates the transistor, pulling the key line to
+                                // GND (= key down).  Optocoupler (PC817 / 4N25) is
+                                // safer if the radio's key input shares ground with
+                                // its high-voltage rails — see README for circuit.
 int        cwWpm       = 25;    // 5-100 WPM, advertised to AetherSDR via cw_keyer_speed
 char       iambicMode  = 'B';   // 'A' or 'B'; B is the most common (memory of opposite paddle)
 
@@ -656,6 +663,9 @@ void setup() {
 
     pinMode(KEY_PIN_DIT, INPUT_PULLUP);
     pinMode(KEY_PIN_DAH, INPUT_PULLUP);
+    pinMode(KEY_PIN_OUT, OUTPUT);
+    digitalWrite(KEY_PIN_OUT, LOW);     // key up at boot — never leave the
+                                        // radio in key-down on power-cycle
 
     drawStatic();
     wifiConnect();
@@ -1192,15 +1202,32 @@ void drainEncoder() {
 }
 
 // ===========================================================================
-// CW Iambic keyer — paddles on D4 (dit) / D5 (dah), output via keyerOutput().
+// CW Iambic keyer — paddles on D4 (dit) / D5 (dah), output on D6 (KEY_PIN_OUT).
+//
 // State machine ticks every loop iteration; element timing derives from cwWpm.
-// Output path is isolated in keyerOutput() so it can be swapped (TCI now,
-// GPIO drive to a hardware key interface later) without touching state logic.
+// Output path is GPIO-direct: writing D6 HIGH/LOW reaches the radio in well
+// under a microsecond.  TCI WebSocket-based keying was tried first
+// (`keyer:0,true|false;` to AetherSDR) but WiFi latency + jitter made dit/dah
+// timing audibly unstable even at 20 WPM.  The bullet-proof path is to drive
+// a key-line transistor / optocoupler directly from the Giga.
+//
+// If you want AetherSDR to *also* see the keyer events for UI / sidetone
+// purposes, set KEYER_TCI_ECHO to 1 below and the function will additionally
+// publish the on/off events over TCI.  The radio is keyed by the GPIO line
+// regardless — the TCI echo is informational, never the source of truth for
+// timing.
 // ===========================================================================
+#ifndef KEYER_TCI_ECHO
+#define KEYER_TCI_ECHO 0
+#endif
+
 void keyerOutput(bool down) {
     if (kr.keyDown == down) return;
     kr.keyDown = down;
+    digitalWrite(KEY_PIN_OUT, down ? HIGH : LOW);
+#if KEYER_TCI_ECHO
     wsSendText(down ? "keyer:0,true;" : "keyer:0,false;");
+#endif
     if (down) kr.txCount++;
     uiNeedsRedraw = true;
 }

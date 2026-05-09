@@ -10,7 +10,7 @@ Ops by **G0JKN / W3**.
 - **TCI WebSocket** client — hand-rolled framing, no external libraries beyond stock Arduino WiFi / Display
 - **Optical encoder** for VFO tuning with software divider and configurable Hz/click
 - **8-button touchscreen** (2 × 4 grid) for VOL / BAND / MODE / VFO ± controls
-- **CW iambic keyer** (Mode A or B) — paddles wired to a 3.5 mm jack, drives the radio via TCI `keyer:` commands
+- **CW iambic keyer** (Mode A or B) — paddles on a 3.5 mm jack, drives the radio's key line through a **GPIO output (D6)** for sub-microsecond, jitter-free timing.  Optional TCI echo (`keyer:0,true|false;`) can be enabled at compile time for AetherSDR-side UI awareness.
 - Live status display on the 800 × 480 panel: frequency, mode, volume, band, encoder diagnostics
 - Falls back to a hardcoded host IP if discovery times out — works against vanilla AetherSDR (≥ v0.9.5.1) once the responder patch lands
 
@@ -59,9 +59,8 @@ Ops by **G0JKN / W3**.
                   │   try to interpret a held key)  │
                   │                                 │
        Radio key  │                                 │
-       (optional) │                                 │
-                  ├──── D6 → buffer (NPN or opto)   │
-                  │     → radio key jack            │
+                  ├──── D6 → NPN or opto buffer     │
+                  │     → radio CW key jack         │
                   │     (see "CW key output" below) │
                   └─────────────────────────────────┘
 ```
@@ -118,13 +117,13 @@ Spin the knob to tune the VFO. Default step is **100 Hz/click** (fine SSB tuning
 ¹ *Status note (2026-05-04):* AetherSDR's TCI server doesn't currently implement `band_up`/`band_down` commands, so the BAND± buttons do nothing. Tracked as a known issue.
 
 ### CW iambic keyer
-Squeeze paddles, send dits/dahs. Default 25 WPM, Iambic Mode B. Adjust with `wpm N` and `iambic A|B` over serial. The Giga handles all element timing and emits `keyer:0,true;` / `keyer:0,false;` to AetherSDR.
+Squeeze paddles, send dits/dahs.  Default 25 WPM, Iambic Mode B.  Adjust with `wpm N` and `iambic A|B` over serial.  The Giga handles all element timing in software and drives the radio's key line directly via **D6** — TCI is bypassed entirely for the timing-critical wire path because WebSocket-over-WiFi latency and jitter made dit/dah length audibly unstable even at modest speeds.
 
-> **Status note:** AetherSDR's TCI CW path was reportedly flaky as of 2026-05-03. The keyer state machine itself is correct — if TCI keying doesn't drive the radio, you can also drive a real radio's key input directly from a GPIO pin (see below).
+> **Optional TCI echo:** if you want AetherSDR to also see the key events for sidetone / UI / metering purposes, define `KEYER_TCI_ECHO 1` at the top of the sketch (or set `-DKEYER_TCI_ECHO=1` at compile time).  The hardware key line is still authoritative for actual radio keying — TCI just gets informational copies.
 
-### CW key output — driving a real radio (optional)
+### CW key output (D6 — default since v0.2)
 
-If you want the keyer to drive a physical radio's key input directly — instead of, or *in addition to*, the TCI command going to AetherSDR — wire a buffer from a free GPIO (default suggested: **D6**) into your radio's key jack. The keyer's element timing is the same either way; only the wire path changes.
+D6 goes HIGH on key-down and LOW on key-up.  Wire a small buffer between D6 and the radio's CW key jack — never connect the Giga GPIO directly to a key line, since some radios bias the line to +12 V or higher.  Two interface options depending on how isolated you want the Giga from the radio:
 
 Two hardware options depending on how isolated you want the Giga from the radio:
 
@@ -166,37 +165,24 @@ Recommended if you're keying a high-power amplifier directly, a tube rig where t
                         (Giga)
 ```
 
-#### Firmware change (~5 lines)
+#### Firmware
 
-The single `keyerOutput()` function in `aether_pad.ino` controls the wire path — touching that one function lets you add or swap the output without changing any of the keyer state machine.
-
-Add a pin constant near the other hardware pins:
-
-```cpp
-const int KEY_OUT_PIN = 6;
-```
-
-In `setup()`, configure the pin as an output:
-
-```cpp
-pinMode(KEY_OUT_PIN, OUTPUT);
-digitalWrite(KEY_OUT_PIN, LOW);
-```
-
-In `keyerOutput()`, add the GPIO drive line alongside (or in place of) the TCI send:
+The keyer's wire path lives in a single `keyerOutput()` function in `aether_pad.ino`.  Default behaviour (since v0.2) is GPIO-only:
 
 ```cpp
 void keyerOutput(bool down) {
     if (kr.keyDown == down) return;
     kr.keyDown = down;
-    digitalWrite(KEY_OUT_PIN, down ? HIGH : LOW);              // hardware key out
-    wsSendText(down ? "keyer:0,true;" : "keyer:0,false;");     // also via TCI (optional)
+    digitalWrite(KEY_PIN_OUT, down ? HIGH : LOW);
+#if KEYER_TCI_ECHO
+    wsSendText(down ? "keyer:0,true;" : "keyer:0,false;");
+#endif
     if (down) kr.txCount++;
     uiNeedsRedraw = true;
 }
 ```
 
-Keep both paths active (TCI for AetherSDR, GPIO for the radio) or comment out the `wsSendText` line if you only want the hardware key out.
+The state machine is fully decoupled from the wire — to add MIDI keying, a second hardware output, or anything else, edit only this function.
 
 ## Serial commands
 
