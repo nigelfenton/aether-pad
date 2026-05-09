@@ -1,0 +1,23 @@
+# Arduino build artefacts
+build/
+*.bin
+*.elf
+*.hex
+*.map
+*.tmp
+
+# IDE / OS
+.vscode/
+.idea/
+*.user
+*.swp
+.DS_Store
+Thumbs.db
+
+# Fusion 360 / SketchUp lockfiles
+*.f3d.lock
+*.skp.lock
+~$*.skp
+
+# Old design iterations the operator may want to drop later — keep them
+# tracked for now so the repo's history shows the case-design evolution.
