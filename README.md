@@ -73,17 +73,80 @@ Touch transform `tx = raw_y, ty = 479 - raw_x` is verified for landscape mountin
 - **Discovery** broadcasts `AETHERPAD?` on the local /24 subnet, UDP port 40002. AetherSDR ≥ v0.9.5.1 (with the [TciServer responder patch](https://github.com/nigelfenton/AetherSDR)) replies unicast `AETHERSDR ip=<addr> tci=<port>`.
 - **Fallback** after 5 s without a reply: `10.0.0.107:40001`. Override at runtime with `ip <addr>` over serial.
 
-## Building
+## Install — build and flash the firmware
 
-Arduino IDE 2.x with the **Arduino Mbed OS Giga Boards** package installed. Required libraries (all from the IDE library manager or auto-installed by the board package):
+You'll need an Arduino Giga R1 WiFi, a USB-C cable, and the Display
+Shield mounted. Everything below runs in the **Arduino IDE** — no
+command-line compiler to wrestle with.
+
+### 1. Install Arduino IDE
+
+Download **Arduino IDE 2.x** from <https://www.arduino.cc/en/software>
+and run the installer (Windows / macOS / Linux all supported).
+
+### 2. Add Giga R1 board support
+
+In the IDE:
+
+1. **Tools → Board → Boards Manager…**
+2. Search for **`Mbed OS Giga`**
+3. Install **Arduino Mbed OS Giga Boards** (latest version)
+
+The board package pulls in the Display Shield libraries automatically:
 
 - `Arduino_H7_Video`
 - `Arduino_GigaDisplay_GFX`
 - `Arduino_GigaDisplayTouch`
 
-Open `aether_pad/aether_pad.ino`, select the **Arduino Giga R1** board, plug the USB-C, hit **Upload**.
+If any are missing, install them via **Sketch → Include Library → Manage Libraries…**
 
-On boot, serial console at 115200 will show:
+### 3. Download the firmware
+
+Either clone the repo:
+
+```sh
+git clone https://github.com/nigelfenton/aether-pad.git
+```
+
+…or click the green **Code → Download ZIP** button at the top of this
+page and unzip it.
+
+### 4. Set your WiFi credentials
+
+Open `aether_pad.ino` in the IDE and edit the two lines near the top:
+
+```cpp
+#define WIFI_SSID  "your-network"
+#define WIFI_PASS  "your-password"
+```
+
+The Giga's WiFi radio is **2.4 GHz only** — point it at your 2.4 GHz SSID,
+not a 5 GHz one.
+
+### 5. Plug in the Giga R1
+
+Connect the Giga to your computer with the USB-C cable. After a few
+seconds it should appear as a new serial port.
+
+### 6. Pick the board and port
+
+- **Tools → Board → Arduino Mbed OS Giga Boards → Arduino Giga R1**
+- **Tools → Port → *<the new port that just appeared>***
+  - Windows: typically `COM4` / `COM5` / etc.
+  - macOS: `/dev/cu.usbmodem…`
+  - Linux: `/dev/ttyACM0`
+
+### 7. Upload
+
+Click the **→** Upload button (top-left of the IDE window). The first
+flash takes 1–2 minutes — subsequent ones are quicker. Watch for
+**"Done uploading."** at the bottom of the IDE.
+
+### 8. Confirm it booted
+
+Open **Tools → Serial Monitor** and set the baud rate to **115200**
+(dropdown bottom-right of the Monitor window). You should see something
+like:
 
 ```
 aether_pad — booting
@@ -96,6 +159,23 @@ AetherSDR @ 10.0.0.107:40001
 TCI: connecting to 10.0.0.107:40001
 TCI: WebSocket handshake OK
 ```
+
+The touchscreen will light up showing frequency / mode / volume cards
+once TCI is connected.
+
+### Troubleshooting
+
+- **No port shows under Tools → Port.** Try a different USB-C cable —
+  some are charge-only and carry no data. Unplug, replug, restart the
+  IDE if needed.
+- **"Board not in selected port" / upload fails.** Double-press the
+  Giga's small reset button to force USB bootloader mode, then re-select
+  the new port (it will change) and Upload again.
+- **WiFi never connects.** Double-check SSID/password spelling. Confirm
+  you're on the 2.4 GHz SSID, not 5 GHz.
+- **TCI never connects.** In AetherSDR, open **Tools → TCI** and make
+  sure the TCI server is enabled on port **40001**. The Giga and the
+  AetherSDR host need to be on the same LAN.
 
 ## Operating
 
