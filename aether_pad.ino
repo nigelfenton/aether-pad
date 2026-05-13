@@ -39,9 +39,15 @@
  *
  * Network
  *   WiFi    : tinkerbell
- *   Discovery: UDP probe "AETHERPAD?" → port 40002, listens for unicast reply
+ *   Discovery (outbound, find AetherSDR):
+ *              UDP probe "AETHERPAD?" → port 40002, listens for unicast reply
  *              "AETHERSDR ip=<addr> tci=<port>". Falls back to 10.0.0.107:40001
  *              after 5 s if no responder is on the LAN yet.
+ *   Discovery (inbound, advertise self):
+ *              mDNS / DNS-SD under _tci._tcp.local per
+ *              github.com/ten9876/AetherSDR/docs/tci-discovery.md.  Class
+ *              "controller", model "aether-pad".  SRV port is 0 — aether_pad
+ *              is a TCI client, not a server.  See mdns_tci.h/.cpp.
  *   Control : TCI WebSocket client to ws://<host>:<port>/ — hand-rolled framing
  *             (same minimal approach as ShackController firmware).
  *
@@ -62,6 +68,7 @@
 #include "Arduino_H7_Video.h"
 #include "Arduino_GigaDisplay_GFX.h"
 #include "Arduino_GigaDisplayTouch.h"
+#include "mdns_tci.h"
 
 // ---------------------------------------------------------------------------
 // Build identification — printed at boot and in `?` output so you can
@@ -235,6 +242,13 @@ String     wsRxBuf;     // accumulated raw bytes from the WS socket
 unsigned long lastDiscoveryTx = 0;
 unsigned long discoveryStarted = 0;
 bool       fallbackArmed = false;
+
+// mDNS / DNS-SD advertiser — announces aether_pad on the LAN per the
+// _tci._tcp.local schema (ten9876/AetherSDR docs/tci-discovery.md).  Brought
+// up in setup() after WiFi associates; polled from loop().  Owns its own
+// WiFiUDP socket bound to 5353 — independent of `udp` above (which handles
+// the existing AETHERPAD?/40002 outbound discovery probe).
+TciMdnsAdvertiser mdns;
 
 // ---------------------------------------------------------------------------
 // HTTP status / control web UI (port 80)
@@ -671,10 +685,22 @@ void setup() {
     wifiConnect();
     udp.begin(DISCOVERY_PORT);
     discoveryStarted = millis();
+
+    // Announce ourselves over mDNS / DNS-SD so AetherSDR's Peripherals
+    // browse can list us without manual IP entry.  Port 0 = TCI client only,
+    // no inbound server endpoint.  Revisit if/when aether_pad grows a
+    // small admin/status TCI endpoint.
+    mdns.begin(/*model*/      "aether-pad",
+               /*class*/      "controller",
+               /*tciVersion*/ "1.9",
+               /*instance*/   "aether_pad G0JKN",
+               /*hostname*/   "aether-pad-g0jkn",
+               /*tciPort*/    0);
 }
 
 void loop() {
     discoveryTick();
+    mdns.loop();
     wsTick();
     handleSerial();
     drainEncoder();
