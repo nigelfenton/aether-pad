@@ -592,6 +592,24 @@ enum BtnId : int8_t {
 };
 const int N_TILES = 10;
 
+// Tile cache — remembers each tile's last-drawn (label, active) pair so
+// drawDynamic can skip the fillRoundRect+text repaint when nothing has
+// changed.  This is the cure for the visible flicker on the BAND tiles:
+// in steady state nothing changes between 250 ms refreshes, so the cache
+// hits and drawTile() never runs for those slots.  Invalidated by
+// drawStatic() (and any code path that wipes the tile region) so the
+// next drawDynamic forces every tile to redraw.
+struct TileLastState {
+    char  label[16];
+    bool  active;
+    bool  valid;
+};
+static TileLastState gTileLast[N_TILES] = {{0}};
+
+static void invalidateTileCache() {
+    for (int i = 0; i < N_TILES; i++) gTileLast[i].valid = false;
+}
+
 // ---------------------------------------------------------------------------
 // Encoder (interrupt-driven, ISR-safe)
 // ---------------------------------------------------------------------------
@@ -1512,6 +1530,10 @@ void drawStatic() {
         const Btn& b = btnTile[i];
         tft.drawRoundRect(b.x, b.y, b.w, b.h, 8, C_BORDER);
     }
+
+    // The screen-wipe above invalidates the tile cache — force the next
+    // drawDynamic to repaint every tile from scratch.
+    invalidateTileCache();
 }
 
 void drawButton(const Btn& b, uint16_t bg, uint16_t fg) {
@@ -1829,7 +1851,23 @@ void drawDynamic() {
                 break;
             default:              active = false;                  break;
         }
-        drawTile(btnTile[i], label, active);
+
+        // Cache check — skip the repaint when this tile's (label, active)
+        // pair matches what we last drew here.  Eliminates the flicker
+        // that came from clearing and re-rendering identical content
+        // every 250 ms.
+        TileLastState& ls = gTileLast[i];
+        const char* lbl   = label ? label : "";
+        bool changed = !ls.valid
+                    || ls.active != active
+                    || strncmp(ls.label, lbl, sizeof(ls.label) - 1) != 0;
+        if (changed) {
+            drawTile(btnTile[i], lbl, active);
+            strncpy(ls.label, lbl, sizeof(ls.label) - 1);
+            ls.label[sizeof(ls.label) - 1] = 0;
+            ls.active = active;
+            ls.valid  = true;
+        }
     }
 }
 
