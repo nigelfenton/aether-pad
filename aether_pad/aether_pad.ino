@@ -69,6 +69,15 @@
 #include "Arduino_GigaDisplay_GFX.h"
 #include "Arduino_GigaDisplayTouch.h"
 #include "mdns_tci.h"
+#include "rc28_hid.h"
+
+// USB HID device — impersonates Icom RC-28 for in-bench testing of
+// AetherSDR's IcomRC28Parser (PR ten9876/AetherSDR#2870). Enumerated at
+// boot; reports are only sent when the operator has entered TEST mode
+// from the touchscreen (long-press on the 10m band tile). NORMAL mode
+// leaves the device enumerated but silent so the host sees no spurious
+// tuning events while aether-pad is in everyday TCI use.
+AetherPad::Rc28Hid rc28;
 
 // ---------------------------------------------------------------------------
 // Build identification — printed at boot and in `?` output so you can
