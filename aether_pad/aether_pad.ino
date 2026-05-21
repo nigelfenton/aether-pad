@@ -814,7 +814,13 @@ static void exitTestMode() {
     Serial.println("TEST MODE: exited (Return tapped)");
     currentMode = AetherPadMode::Normal;
     // wsTick will auto-reconnect on its next 3-second retry.
-    uiNeedsRedraw = true;     // force full repaint of NORMAL UI
+    // Force a FULL repaint — drawStatic() does fillScreen() and rebuilds
+    // the chip + band-tile layout; drawDynamic() then fills in the live
+    // values. uiNeedsRedraw alone would only run drawDynamic, leaving
+    // the TEST banner/buttons showing through (partial-return bug).
+    drawStatic();
+    drawDynamic();
+    uiNeedsRedraw = false;
 }
 
 // Send a test stimulus based on which button was pressed.  Each updates
