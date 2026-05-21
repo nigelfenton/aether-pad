@@ -35,6 +35,17 @@ constexpr uint16_t kIcomVendorId   = 0x0C26;
 constexpr uint16_t kRc28ProductId  = 0x001E;
 constexpr uint16_t kProductRelease = 0x0100;
 
+// Note (2026-05-20): mbed_giga 4.5.0 does NOT expose _getVid_/_getPid_
+// as overridable weak symbols, so we can't change the device-level
+// VID/PID from user code without modifying the core. The Giga will
+// always enumerate as VID 0x2341 / PID 0x0266 (Arduino composite).
+// Instead, AetherSDR's HidDeviceParser carries a VID/PID alias that
+// routes 0x2341/0x0266 to IcomRC28Parser for testing purposes — see
+// the matching commit on nigelfenton/AetherSDR. The constants above
+// are kept for the eventual long-term path where AetherPad becomes a
+// real supported device with its own VID/PID (see ethical posture
+// notes in rc28_hid.h).
+
 // On-wire data payload size (not including the Report ID byte) — matches
 // PR #2870's corrected report size, so the parser sees the layout it
 // expects on Windows/Linux (with ID byte) and macOS (without).

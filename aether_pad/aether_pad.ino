@@ -8,7 +8,8 @@
  *   Giga Display Shield (800×480 landscape, GT911 touch, USB-C on right edge)
  *   Optical encoder (NPN open-collector — pick type below via #define):
  *     LPD3806-600BM-G5-24C : 600 PPR, 5-24 V supply  → power from Giga 5 V pin
- *     Autonics E50S-360B   : 360 PPR, 12-24 V supply → power from shack 13.8 V rail
+ *     Autonics E50S-360B   : 360 PPR, 12-24 V supply → power from shack 13.8 V railyou stiring up trouble?
+ 
  *     A → D2  (10 kΩ external pull-up to 3.3 V — Giga INPUT_PULLUP alone is too weak)
  *     B → D3  (10 kΩ external pull-up to 3.3 V — Giga INPUT_PULLUP alone is too weak)
  *     +V → 5 V (LPD3806) or external 13.8 V (Autonics — LED needs 12-24 V)
@@ -678,6 +679,222 @@ int  bandIdxForFreq(long hz);
 const char* encTargetName(EncoderTarget t);
 
 // ===========================================================================
+// RC-28 emulator TEST mode  (long-press the 10m band tile to enter)
+// ===========================================================================
+//
+// State machine:   NORMAL  ──[10m long-press]──▶  TEST
+//                     ▲                            │
+//                     └────[Return tap]────────────┘
+//
+// In TEST mode the TCI WebSocket is disconnected and the screen swaps to
+// a 6-button grid (A..F) + Return.  Each button fires a specific Icom
+// RC-28 HID report sequence via the `rc28` object so we can drive
+// AetherSDR's IcomRC28Parser with known stimuli (see PR #2870).
+//
+// On 10m long-press: 200ms dead-zone (so a normal tap still selects 10m),
+// then a left-to-right red curtain animates across the screen over ~1300ms.
+// If the operator releases before the curtain reaches the right edge, the
+// gesture is aborted and the normal UI is repainted.  Reaching the right
+// edge commits to TEST mode.
+
+enum class AetherPadMode : uint8_t { Normal, Test };
+static AetherPadMode currentMode = AetherPadMode::Normal;
+
+// 10m tile gesture state
+static bool          gestureActive    = false;   // 10m held past dead-zone
+static unsigned long gestureStartMs   = 0;       // when the touch first started
+static int           gestureFillPx    = 0;       // current red-curtain x position
+static unsigned long gestureLastFrameMs = 0;
+const  unsigned long GESTURE_DEAD_ZONE_MS = 200;
+const  unsigned long GESTURE_WIPE_MS      = 1300; // 200 + 1300 = ~1.5 s commit
+const  uint16_t      GESTURE_FILL_COLOR   = 0xC000; // dark red
+
+// TEST screen button IDs — must not collide with BtnId enum values (which
+// max out at BTN_TILE_BASE + N_TILES - 1 = 14).
+const int8_t BTN_TEST_A      = 20;
+const int8_t BTN_TEST_B      = 21;
+const int8_t BTN_TEST_C      = 22;
+const int8_t BTN_TEST_D      = 23;
+const int8_t BTN_TEST_E      = 24;
+const int8_t BTN_TEST_F      = 25;
+const int8_t BTN_TEST_RETURN = 26;
+
+// TEST screen layout (800x480 landscape)
+struct TestRect { int x, y, w, h; };
+const TestRect TEST_BANNER       = {   0,   0, 800,  44 };
+const TestRect TEST_STATUS       = {   0,  46, 800,  34 };
+const int      TEST_BTN_W        = 200;
+const int      TEST_BTN_H        = 110;
+const int      TEST_BTN_GAP_X    =  30;
+const int      TEST_ROW1_Y       =  98;
+const int      TEST_ROW2_Y       = 220;
+const int      TEST_GRID_LEFT    = (800 - 3 * TEST_BTN_W - 2 * TEST_BTN_GAP_X) / 2;
+const TestRect TEST_BTN_A_R      = { TEST_GRID_LEFT + 0 * (TEST_BTN_W + TEST_BTN_GAP_X), TEST_ROW1_Y, TEST_BTN_W, TEST_BTN_H };
+const TestRect TEST_BTN_B_R      = { TEST_GRID_LEFT + 1 * (TEST_BTN_W + TEST_BTN_GAP_X), TEST_ROW1_Y, TEST_BTN_W, TEST_BTN_H };
+const TestRect TEST_BTN_C_R      = { TEST_GRID_LEFT + 2 * (TEST_BTN_W + TEST_BTN_GAP_X), TEST_ROW1_Y, TEST_BTN_W, TEST_BTN_H };
+const TestRect TEST_BTN_D_R      = { TEST_GRID_LEFT + 0 * (TEST_BTN_W + TEST_BTN_GAP_X), TEST_ROW2_Y, TEST_BTN_W, TEST_BTN_H };
+const TestRect TEST_BTN_E_R      = { TEST_GRID_LEFT + 1 * (TEST_BTN_W + TEST_BTN_GAP_X), TEST_ROW2_Y, TEST_BTN_W, TEST_BTN_H };
+const TestRect TEST_BTN_F_R      = { TEST_GRID_LEFT + 2 * (TEST_BTN_W + TEST_BTN_GAP_X), TEST_ROW2_Y, TEST_BTN_W, TEST_BTN_H };
+const TestRect TEST_BTN_RETURN_R = { 800/2 - 110, 370, 220, 90 };
+
+// Last-sent stimulus description for the status line.
+static char gLastSent[64] = "(no reports sent yet)";
+
+static bool inTestRect(const TestRect& r, int x, int y) {
+    return x >= r.x && x < (r.x + r.w) && y >= r.y && y < (r.y + r.h);
+}
+
+static int8_t testBtnAtPoint(int x, int y) {
+    if (inTestRect(TEST_BTN_A_R,      x, y)) return BTN_TEST_A;
+    if (inTestRect(TEST_BTN_B_R,      x, y)) return BTN_TEST_B;
+    if (inTestRect(TEST_BTN_C_R,      x, y)) return BTN_TEST_C;
+    if (inTestRect(TEST_BTN_D_R,      x, y)) return BTN_TEST_D;
+    if (inTestRect(TEST_BTN_E_R,      x, y)) return BTN_TEST_E;
+    if (inTestRect(TEST_BTN_F_R,      x, y)) return BTN_TEST_F;
+    if (inTestRect(TEST_BTN_RETURN_R, x, y)) return BTN_TEST_RETURN;
+    return BTN_NONE;
+}
+
+static void drawTestButton(const TestRect& r, const char* label, uint16_t bg, uint16_t fg) {
+    tft.fillRect(r.x, r.y, r.w, r.h, bg);
+    tft.drawRect(r.x, r.y, r.w, r.h, C_WHITE);
+    tft.setTextColor(fg);
+    tft.setTextSize(5);
+    // Crude centring — assumes single-char or short labels
+    int approxCharW = 6 * 5;  // GFX default font is 6px per char at size 1
+    int tw = (int)strlen(label) * approxCharW;
+    int th = 8 * 5;
+    tft.setCursor(r.x + (r.w - tw) / 2, r.y + (r.h - th) / 2);
+    tft.print(label);
+}
+
+static void drawTestStatic() {
+    tft.fillScreen(C_BG);
+    // Banner
+    tft.fillRect(TEST_BANNER.x, TEST_BANNER.y, TEST_BANNER.w, TEST_BANNER.h, C_RED);
+    tft.setTextColor(C_WHITE);
+    tft.setTextSize(3);
+    tft.setCursor(40, TEST_BANNER.y + 10);
+    tft.print("TEST MODE   -   TCI DISCONNECTED");
+    // 6 buttons
+    drawTestButton(TEST_BTN_A_R, "A", C_PANEL, C_WHITE);
+    drawTestButton(TEST_BTN_B_R, "B", C_PANEL, C_WHITE);
+    drawTestButton(TEST_BTN_C_R, "C", C_PANEL, C_WHITE);
+    drawTestButton(TEST_BTN_D_R, "D", C_PANEL, C_WHITE);
+    drawTestButton(TEST_BTN_E_R, "E", C_PANEL, C_WHITE);
+    drawTestButton(TEST_BTN_F_R, "F", C_PANEL, C_WHITE);
+    // Return — orange/amber so it's clearly distinct
+    drawTestButton(TEST_BTN_RETURN_R, "Return", C_AMBER, 0x0000);
+}
+
+static void drawTestDynamic() {
+    // Just the status line; rest of the screen is static.
+    tft.fillRect(TEST_STATUS.x, TEST_STATUS.y, TEST_STATUS.w, TEST_STATUS.h, C_BORDER);
+    tft.setTextColor(C_WHITE);
+    tft.setTextSize(2);
+    tft.setCursor(20, TEST_STATUS.y + 9);
+    tft.print("Last sent: ");
+    tft.print(gLastSent);
+}
+
+static void enterTestMode() {
+    Serial.println("TEST MODE: entered (10m long-press committed)");
+    currentMode = AetherPadMode::Test;
+    // Drop the TCI WebSocket — wsTick will see the disconnect on next tick
+    // and stop trying to reconnect while currentMode == Test (see wsTick mod).
+    if (tcp.connected()) tcp.stop();
+    st.tciConnected = false;
+    wsHandshakeDone = false;
+    snprintf(gLastSent, sizeof(gLastSent), "(no reports sent yet)");
+    drawTestStatic();
+    drawTestDynamic();
+}
+
+static void exitTestMode() {
+    Serial.println("TEST MODE: exited (Return tapped)");
+    currentMode = AetherPadMode::Normal;
+    // wsTick will auto-reconnect on its next 3-second retry.
+    uiNeedsRedraw = true;     // force full repaint of NORMAL UI
+}
+
+// Send a test stimulus based on which button was pressed.  Each updates
+// gLastSent for the status line and schedules a dynamic redraw.
+static void fireTestStimulus(int8_t btn) {
+    switch (btn) {
+        case BTN_TEST_A:
+            rc28.sendDetent(AetherPad::Rc28Dir::Cw);
+            snprintf(gLastSent, sizeof(gLastSent),
+                     "CW 1 detent  (seq=01 dir=01 btn=07; then seq=02)");
+            break;
+        case BTN_TEST_B:
+            rc28.sendDetent(AetherPad::Rc28Dir::Ccw);
+            snprintf(gLastSent, sizeof(gLastSent),
+                     "CCW 1 detent (seq=01 dir=02 btn=07; then seq=02)");
+            break;
+        case BTN_TEST_C:
+            rc28.sendButton(AetherPad::Rc28Button::F1);
+            delay(150);
+            rc28.sendButton(AetherPad::Rc28Button::Idle);
+            snprintf(gLastSent, sizeof(gLastSent),
+                     "F1 press+release  (btn=05 -> 07)");
+            break;
+        case BTN_TEST_D:
+            rc28.sendButton(AetherPad::Rc28Button::F2);
+            delay(150);
+            rc28.sendButton(AetherPad::Rc28Button::Idle);
+            snprintf(gLastSent, sizeof(gLastSent),
+                     "F2 press+release  (btn=03 -> 07)");
+            break;
+        case BTN_TEST_E:
+            rc28.sendButton(AetherPad::Rc28Button::Tx);
+            delay(150);
+            rc28.sendButton(AetherPad::Rc28Button::Idle);
+            snprintf(gLastSent, sizeof(gLastSent),
+                     "TX bar press+release  (btn=06 -> 07)");
+            break;
+        case BTN_TEST_F:
+            rc28.sendMacOsEdgeCase();
+            snprintf(gLastSent, sizeof(gLastSent),
+                     "macOS edge case  (seq=01 CW; trigger for #2870 macOS bug)");
+            break;
+        default: return;
+    }
+    drawTestDynamic();
+}
+
+// Called every loop() iteration. Drives the 10m long-press wipe animation
+// when gestureActive is true. Does nothing if no gesture is in progress
+// or if we're already in TEST mode.
+static void gestureWipeTick() {
+    if (currentMode == AetherPadMode::Test) return;
+    if (!gestureActive) {
+        // If a previous gesture was aborted, gestureFillPx may be > 0;
+        // the abort handler in handleTouch sets uiNeedsRedraw to fully
+        // repaint the screen, which clears the red curtain naturally.
+        return;
+    }
+    unsigned long now = millis();
+    unsigned long held = now - gestureStartMs;
+    if (held < GESTURE_DEAD_ZONE_MS) return;        // still in dead-zone
+    if (now - gestureLastFrameMs < 25) return;      // ~40fps cap
+    gestureLastFrameMs = now;
+
+    long progress = (long)(held - GESTURE_DEAD_ZONE_MS);
+    int targetPx = (int)((progress * 800L) / (long)GESTURE_WIPE_MS);
+    if (targetPx > 800) targetPx = 800;
+    if (targetPx > gestureFillPx) {
+        tft.fillRect(gestureFillPx, 0, targetPx - gestureFillPx, 480, GESTURE_FILL_COLOR);
+        gestureFillPx = targetPx;
+    }
+    if (gestureFillPx >= 800) {
+        gestureActive    = false;
+        gestureFillPx    = 0;
+        gestureLastFrameMs = 0;
+        enterTestMode();
+    }
+}
+
+// ===========================================================================
 // Setup / loop
 // ===========================================================================
 void setup() {
@@ -738,6 +955,9 @@ void loop() {
     // version blocked iambic A/B chip taps whenever D4/D5 noise put the
     // state machine into a non-IDLE cycle.
     handleTouch();
+
+    // Animate the 10m long-press wipe (no-op unless gestureActive).
+    gestureWipeTick();
 
     // Drawing is the expensive one (~30-50 ms of GFX). Two paths:
     //   1. Explicit user action (uiNeedsRedraw flag set) → redraw NOW,
@@ -844,6 +1064,9 @@ void discoveryTick() {
 // ===========================================================================
 void wsTick() {
     if (!st.hostKnown) return;
+    // While in RC-28 TEST mode, the TCI socket is intentionally torn down
+    // (see enterTestMode). Don't reconnect until the operator exits TEST.
+    if (currentMode == AetherPadMode::Test) return;
 
     if (!tcp.connected()) {
         if (st.tciConnected) {
@@ -1067,6 +1290,9 @@ static bool inBtn(const Btn& b, int x, int y) {
 }
 
 static int8_t btnAtPoint(int x, int y) {
+    // TEST mode has a completely different button layout; redirect.
+    if (currentMode == AetherPadMode::Test) return testBtnAtPoint(x, y);
+
     if (inBtn(btnFreqChip,  x, y)) return BTN_FREQ_CHIP;
     if (inBtn(btnVolChip,   x, y)) return BTN_VOL_CHIP;
     if (inBtn(btnModeChip,  x, y)) return BTN_MODE_CHIP;
@@ -1101,6 +1327,16 @@ static void firePressTile(int idx) {
 }
 
 static void firePress(int8_t btn) {
+    // TEST mode buttons get routed first so the normal handlers don't
+    // accidentally fire (BTN_TEST_* values are above the BTN_TILE_BASE range).
+    if (btn >= BTN_TEST_A && btn <= BTN_TEST_F) {
+        fireTestStimulus(btn);
+        return;
+    }
+    if (btn == BTN_TEST_RETURN) {
+        exitTestMode();
+        return;
+    }
     if (btn >= BTN_TILE_BASE && btn < BTN_TILE_BASE + N_TILES) {
         firePressTile(btn - BTN_TILE_BASE);
         return;
@@ -1148,6 +1384,14 @@ void handleTouch() {
         // the GT911 and would otherwise reset heldBtn → next loop iteration
         // would fire the same button again past the 220ms debounce window.
         if (heldBtn != BTN_NONE && (millis() - lastTouchSeen) >= RELEASE_MS) {
+            // 10m-tile gesture aborted before committing — repaint normal UI
+            // to clear the red curtain that gestureWipeTick painted.
+            if (gestureActive) {
+                gestureActive   = false;
+                gestureFillPx   = 0;
+                gestureLastFrameMs = 0;
+                uiNeedsRedraw   = true;
+            }
             heldBtn        = BTN_NONE;
             longPressFired = false;
         }
@@ -1192,6 +1436,22 @@ void handleTouch() {
         // exactly once. To cycle further the user must release and press again.
         fireLongPress(heldBtn);
         longPressFired = true;
+    }
+
+    // RC-28 test-mode gesture: detect 10m tile held past the dead-zone.
+    // gestureWipeTick() (called from loop()) does the per-frame animation
+    // and commits to TEST mode when the wipe completes.  We just flip the
+    // flag here so the wipe tick knows it's allowed to run.
+    const int8_t kBtnTenM = (int8_t)(BTN_TILE_BASE + 9);   // 10m tile
+    if (currentMode == AetherPadMode::Normal
+        && heldBtn == kBtnTenM
+        && !gestureActive
+        && (millis() - heldSince) >= GESTURE_DEAD_ZONE_MS) {
+        gestureActive    = true;
+        gestureStartMs   = heldSince;
+        gestureFillPx    = 0;
+        gestureLastFrameMs = 0;
+        Serial.println("TEST MODE: 10m long-press past dead-zone, starting wipe");
     }
 }
 
@@ -1525,6 +1785,9 @@ void cmdIambicToggle() {
 // Display rendering
 // ===========================================================================
 void drawStatic() {
+    // TEST mode owns the whole screen — divert.
+    if (currentMode == AetherPadMode::Test) { drawTestStatic(); drawTestDynamic(); return; }
+
     tft.fillScreen(C_BG);
 
     // Title bar
@@ -1757,6 +2020,9 @@ static void drawTile(const Btn& b, const char* label, bool active) {
 }
 
 void drawDynamic() {
+    // TEST mode draws its own dynamic surface (status line refresh only).
+    if (currentMode == AetherPadMode::Test) { drawTestDynamic(); return; }
+
     char buf[64];
 
     // ── Connection status pill (top right of title bar) ───────────
