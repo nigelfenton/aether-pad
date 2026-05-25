@@ -4,6 +4,13 @@ A standalone hardware control surface for [AetherSDR](https://github.com/ten9876
 
 Ops by **G0JKN / W3**.
 
+## Gallery
+
+| Boot — persona menu | Running — TCI persona |
+|---|---|
+| ![Splash / persona menu](docs/images/splash.jpg) | ![TCI operator screen on 10 m USB](docs/images/operator-tci.jpg) |
+| Three-button splash (TCI / RC-28 / AetherControl) with 3 s auto-continue. Tap the title bar on any operator screen to re-open this menu. | TCI persona running against AetherSDR — 28.500.000 MHz USB, 10 m band selected. Modal chips arm the encoder for volume / mode / step / keyer in turn. |
+
 ## Features
 
 - **Auto-discovery** of AetherSDR on the LAN (UDP probe → unicast reply on port 40002)
