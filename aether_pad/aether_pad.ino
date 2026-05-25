@@ -739,7 +739,29 @@ static const char* const PERSONA_LABEL[] = {
     "AetherControl",           // NormalAetherControl
     "TEST",                    // Test (not shown by the carousel)
 };
+// Short labels for the in-screen persona pill (limited width — "AetherControl"
+// would overflow a 100-px pill at size 2).
+static const char* const PERSONA_PILL[] = {
+    "TCI",                     // NormalTci
+    "RC-28",                   // NormalRc28
+    "AeCtrl",                  // NormalAetherControl
+    "TEST",                    // Test (pill is hidden in TEST mode anyway)
+};
 const uint8_t PERSONA_CAROUSEL_COUNT = 3;   // Normal* only
+
+// Per-persona accent colour. All operator-screen "highlight" surfaces
+// (title text, armed chip border, active tile border + label) source their
+// accent from here so an operator can tell at a glance which persona is
+// currently active. Splash buttons already use these same three accents
+// (see drawSplash); this just propagates them into the operator UI.
+static inline uint16_t personaAccent() {
+    switch (currentMode) {
+        case AetherPadMode::NormalRc28:           return C_AMBER;
+        case AetherPadMode::NormalAetherControl:  return C_GREEN;
+        case AetherPadMode::NormalTci:
+        default:                                  return C_CYAN;
+    }
+}
 
 // Splash screen / persona menu — drawn at boot and re-opened by tapping the
 // title bar on any operator screen. Three big buttons let the operator pick
@@ -1893,8 +1915,13 @@ void drawStatic() {
 
     tft.fillScreen(C_BG);
 
-    // Title bar
-    tft.setTextColor(C_CYAN); tft.setTextSize(3);
+    // Title bar — text colour follows the current persona's accent so a
+    // glance at the screen tells the operator which page they're on (cyan
+    // = TCI, amber = RC-28, green = AetherControl). The persona pill drawn
+    // by drawPersonaPill() (called from drawDynamic) carries the textual
+    // "you are here" badge.
+    const uint16_t accent = personaAccent();
+    tft.setTextColor(accent); tft.setTextSize(3);
     tft.setCursor(8, 4); tft.print("AETHER_PAD");
     tft.setTextColor(C_MUTED); tft.setTextSize(2);
     tft.setCursor(220, 10); tft.print("G0JKN/W3");
@@ -2215,11 +2242,12 @@ static void drawKeyIcon(int cx, int cy, int s, uint16_t color) {
 //                          ~32 px). The icon serves as the visual label so
 //                          the small text label is dropped.
 //
-// `armed` adds the cyan glow border so the operator can see at a glance
-// which parameter the encoder is currently controlling.
+// `armed` adds a persona-accent glow border so the operator can see at a
+// glance which parameter the encoder is currently controlling. The accent
+// colour (cyan / amber / green) tracks the current persona.
 static void drawChip(const Btn& b, const char* label, const char* value,
                      uint16_t valColor, bool armed, ChipIcon icon = ICON_NONE) {
-    uint16_t border = armed ? C_CYAN : C_BORDER;
+    uint16_t border = armed ? personaAccent() : C_BORDER;
     uint16_t bg     = armed ? 0x0820 : C_PANEL;
     tft.fillRoundRect(b.x, b.y, b.w, b.h, 8, bg);
     tft.drawRoundRect(b.x, b.y, b.w, b.h, 8, border);
@@ -2282,9 +2310,10 @@ static void drawChip(const Btn& b, const char* label, const char* value,
 // KEYER). Text size auto-shrinks for longer labels (e.g. "18 WPM"
 // wouldn't fit at size 4 in a 156-wide tile).
 static void drawTile(const Btn& b, const char* label, bool active) {
-    uint16_t border = active ? C_CYAN  : C_BORDER;
-    uint16_t bg     = active ? 0x0820  : C_PANEL;
-    uint16_t fg     = active ? C_CYAN  : C_WHITE;
+    const uint16_t accent = personaAccent();
+    uint16_t border = active ? accent : C_BORDER;
+    uint16_t bg     = active ? 0x0820 : C_PANEL;
+    uint16_t fg     = active ? accent : C_WHITE;
     tft.fillRoundRect(b.x, b.y, b.w, b.h, 8, bg);
     tft.drawRoundRect(b.x, b.y, b.w, b.h, 8, border);
     if (active) {
@@ -2313,6 +2342,22 @@ void drawDynamic() {
 
     char buf[64];
 
+    // ── Persona pill (left of the connection pill) ────────────────
+    // 100 × 28 outlined badge showing the current persona (TCI / RC-28 /
+    // AeCtrl). Coloured-text-on-dark to match the connection pill's look.
+    // Hidden in TEST mode (we never reach here from TEST — drawTestDynamic
+    // handles that screen — but defensive `isNormalMode()` check anyway).
+    if (isNormalMode()) {
+        const uint16_t accent = personaAccent();
+        const char* personaTxt = PERSONA_PILL[(uint8_t)currentMode];
+        tft.fillRect(586, 2, 100, 28, C_PANEL);
+        tft.drawRect(586, 2, 100, 28, accent);
+        tft.setTextColor(accent); tft.setTextSize(2);
+        int ppw = strlen(personaTxt) * 12;
+        tft.setCursor(586 + (100 - ppw) / 2, 8);
+        tft.print(personaTxt);
+    }
+
     // ── Connection status pill (top right of title bar) ───────────
     uint16_t pillBg, pillFg; const char* pillTxt;
     if (st.tciConnected)      { pillBg = 0x0340; pillFg = C_GREEN; pillTxt = "LIVE"; }
@@ -2336,11 +2381,12 @@ void drawDynamic() {
     bool vfoArmed = (encTarget == TGT_VFO);
     uint16_t vfoBg = vfoArmed ? 0x0820 : C_BG;
     tft.fillRect(btnFreqChip.x, btnFreqChip.y, btnFreqChip.w, btnFreqChip.h, vfoBg);
+    const uint16_t vfoAccent = personaAccent();
     if (vfoArmed) {
         tft.drawRoundRect(btnFreqChip.x + 4, btnFreqChip.y + 2,
-                          btnFreqChip.w - 8, btnFreqChip.h - 4, 6, C_CYAN);
+                          btnFreqChip.w - 8, btnFreqChip.h - 4, 6, vfoAccent);
     }
-    tft.setTextSize(5); tft.setTextColor(C_CYAN);
+    tft.setTextSize(5); tft.setTextColor(vfoAccent);
     int fw = strlen(buf) * 30;
     tft.setCursor((800 - fw) / 2, btnFreqChip.y + 8); tft.print(buf);
     tft.setTextSize(1); tft.setTextColor(C_MUTED);
