@@ -1,3 +1,16 @@
+// ###########################################################################
+// #                                                                         #
+// #   BUILD MARKER:  SPLASH / PERSONA MENU v5  (boot-phase status strip)    #
+// #                                                                         #
+// #   Boot -> splash screen with 3 persona buttons (TCI / RC-28 /           #
+// #   AetherControl) and a 3 s auto-continue (defaults to TCI for now).    #
+// #   Tap any button on splash = enter that persona's operator screen.     #
+// #   Tap the title bar on the operator screen = re-open the splash as a   #
+// #   menu (auto-continues back to current persona on no-tap).             #
+// #   10m tile long-press still enters TEST mode (unchanged).               #
+// #                                                                         #
+// ###########################################################################
+
 /*
  * aether_pad.ino
  * Standalone AetherSDR control surface — Arduino Giga R1 WiFi + Display Shield
@@ -598,6 +611,7 @@ enum BtnId : int8_t {
     BTN_MODE_CHIP,             // MODE card       — arm TGT_MODE
     BTN_STEP_CHIP,             // STEP card       — arm TGT_STEP
     BTN_KEYER_CHIP,            // KEYER card      — arm TGT_KEYER (WPM)
+    BTN_TITLE,                 // title bar strip — long-press = persona carousel
     BTN_TILE_BASE              // bottom-row tiles 0..9 are BTN_TILE_BASE+idx
 };
 const int N_TILES = 10;
@@ -678,6 +692,11 @@ void cmdIambicToggle();
 int  bandIdxForFreq(long hz);
 const char* encTargetName(EncoderTarget t);
 
+// Persona stubs — declared here for use from switchToPersona().
+void tciResume();
+void rc28PersonaBegin();
+void aetherControlBegin();
+
 // ===========================================================================
 // RC-28 emulator TEST mode  (long-press the 10m band tile to enter)
 // ===========================================================================
@@ -697,8 +716,65 @@ const char* encTargetName(EncoderTarget t);
 // gesture is aborted and the normal UI is repainted.  Reaching the right
 // edge commits to TEST mode.
 
-enum class AetherPadMode : uint8_t { Normal, Test };
-static AetherPadMode currentMode = AetherPadMode::Normal;
+// AetherPadMode is the master state. Three Normal* personas (the device's
+// USB role) plus a single Test harness mode that's sibling to all three.
+// Numerically the Normal* values are 0..2 (used by the persona carousel as
+// indices into PERSONA_LABEL[]); Test is 3 and is entered/exited via its
+// own gesture (10m tile long-press / Return tap), never via the carousel.
+enum class AetherPadMode : uint8_t {
+    NormalTci = 0,             // WiFi/TCI to AetherSDR — historical default
+    NormalRc28,                // USB HID — Icom RC-28 emulator
+    NormalAetherControl,       // USB CDC — FlexControl emulator (stub)
+    Test                       // RC-28 test harness (existing 10m-tile path)
+};
+static AetherPadMode currentMode      = AetherPadMode::NormalTci;
+static AetherPadMode g_prevPersonaMode = AetherPadMode::NormalTci;   // restored on TEST exit
+
+inline bool isTestMode()   { return currentMode == AetherPadMode::Test; }
+inline bool isNormalMode() { return !isTestMode(); }
+
+static const char* const PERSONA_LABEL[] = {
+    "TCI",                     // NormalTci
+    "RC-28",                   // NormalRc28
+    "AetherControl",           // NormalAetherControl
+    "TEST",                    // Test (not shown by the carousel)
+};
+const uint8_t PERSONA_CAROUSEL_COUNT = 3;   // Normal* only
+
+// Splash screen / persona menu — drawn at boot and re-opened by tapping the
+// title bar on any operator screen. Three big buttons let the operator pick
+// TCI / RC-28 / AetherControl. After SPLASH_TIMEOUT_MS with no tap, the
+// splash auto-continues to autoPick: at boot that's TCI (TODO: persist
+// last-used persona in flash and use it as boot default); when re-opened
+// via the title-bar menu, autoPick is currentMode so a stray no-tap doesn't
+// switch persona on us.
+const unsigned long SPLASH_TIMEOUT_MS = 3000;
+struct Splash {
+    bool          active        = true;
+    bool          armed         = false;  // false = boot/wifi phase (no countdown), true = timer running
+    unsigned long startMs       = 0;
+    AetherPadMode autoPick      = AetherPadMode::NormalTci;
+    int           lastSecLeft   = -1;     // for incremental countdown redraw
+};
+static Splash g_splash;
+
+// Splash button rects (3 across, ~250 px wide each, centered band of screen)
+const int SPLASH_BTN_Y = 230;
+const int SPLASH_BTN_H = 130;
+const int SPLASH_BTN_W = 240;
+const int SPLASH_BTN_GAP = 20;
+const int SPLASH_BTN_TCI_X    =  20;
+const int SPLASH_BTN_RC28_X   = SPLASH_BTN_TCI_X  + SPLASH_BTN_W + SPLASH_BTN_GAP;
+const int SPLASH_BTN_ACTRL_X  = SPLASH_BTN_RC28_X + SPLASH_BTN_W + SPLASH_BTN_GAP;
+
+// Forward decls that need AetherPadMode in scope — must come after the enum.
+void switchToPersona(AetherPadMode m);
+void openSplash(bool autoToCurrent);
+void openSplashBoot();
+void drawSplash();
+void splashTick();
+void splashHandleTouch();
+void splashStatus(const char* msg, uint16_t fg);
 
 // 10m tile gesture state
 static bool          gestureActive    = false;   // 10m held past dead-zone
@@ -799,6 +875,7 @@ static void drawTestDynamic() {
 
 static void enterTestMode() {
     Serial.println("TEST MODE: entered (10m long-press committed)");
+    g_prevPersonaMode = currentMode;          // remember persona to restore on exit
     currentMode = AetherPadMode::Test;
     // Drop the TCI WebSocket — wsTick will see the disconnect on next tick
     // and stop trying to reconnect while currentMode == Test (see wsTick mod).
@@ -812,7 +889,7 @@ static void enterTestMode() {
 
 static void exitTestMode() {
     Serial.println("TEST MODE: exited (Return tapped)");
-    currentMode = AetherPadMode::Normal;
+    currentMode = g_prevPersonaMode;          // back to whichever persona was active
     // wsTick will auto-reconnect on its next 3-second retry.
     // Force a FULL repaint — drawStatic() does fillScreen() and rebuilds
     // the chip + band-tile layout; drawDynamic() then fills in the live
@@ -931,10 +1008,19 @@ void setup() {
     digitalWrite(KEY_PIN_OUT, LOW);     // key up at boot — never leave the
                                         // radio in key-down on power-cycle
 
-    drawStatic();
+    // Splash first — operator sees the persona menu immediately, no flash
+    // of the operator UI while WiFi associates. Countdown is disabled here;
+    // wifiConnect paints its status message into the splash's status strip.
+    openSplashBoot();
+
     wifiConnect();
     udp.begin(DISCOVERY_PORT);
     discoveryStarted = millis();
+
+    // WiFi up — arm the auto-continue timer.
+    // TODO(phase 2): read last-used persona from flash and seed
+    // g_splash.autoPick with it instead of always defaulting to TCI.
+    openSplash(/*autoToCurrent=*/false);
 
     // Announce ourselves over mDNS / DNS-SD so AetherSDR's Peripherals
     // browse can list us without manual IP entry.  Port 0 = TCI client only,
@@ -955,6 +1041,14 @@ void loop() {
     handleSerial();
     drainEncoder();
     keyerTick();
+
+    // Splash / persona menu owns the screen — bypass normal touch + draw
+    // paths while it's up. Splash drives its own touch and countdown.
+    if (g_splash.active) {
+        splashHandleTouch();
+        splashTick();
+        return;
+    }
 
     // Touch is cheap (GT911 I2C, ~5-10 ms) — always run so taps register
     // even when the keyer is mid-element. The earlier skip-during-keyer
@@ -988,16 +1082,15 @@ void loop() {
 // WiFi
 // ===========================================================================
 void wifiConnect() {
-    tft.setTextColor(C_CYAN); tft.setTextSize(2);
-    tft.setCursor(60, 230); tft.print("Connecting to WiFi...");
+    // Status message goes into the splash's bottom strip — doesn't overlap
+    // the persona buttons.
+    splashStatus("Connecting to WiFi...", C_CYAN);
 
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     Serial.print("WiFi: ");
     while (WiFi.status() != WL_CONNECTED) { delay(400); Serial.print("."); }
     Serial.println();
     Serial.print("WiFi connected, IP = "); Serial.println(WiFi.localIP());
-
-    tft.fillRect(0, 220, 800, 40, C_BG);
 }
 
 // ===========================================================================
@@ -1307,6 +1400,9 @@ static int8_t btnAtPoint(int x, int y) {
     for (int i = 0; i < N_TILES; i++) {
         if (inBtn(btnTile[i], x, y)) return (int8_t)(BTN_TILE_BASE + i);
     }
+    // Title bar strip (y = 0..30) — last because nothing else lives there.
+    // Used only by the persona carousel long-press; a plain tap is a no-op.
+    if (y >= 0 && y < 30) return BTN_TITLE;
     return BTN_NONE;
 }
 
@@ -1353,13 +1449,14 @@ static void firePress(int8_t btn) {
         case BTN_MODE_CHIP:  cmdEncoderTarget(TGT_MODE);   break;
         case BTN_STEP_CHIP:  cmdEncoderTarget(TGT_STEP);   break;
         case BTN_KEYER_CHIP: cmdEncoderTarget(TGT_KEYER);  break;
+        case BTN_TITLE:      openSplash(/*autoToCurrent=*/true); break;
     }
 }
 
 static void fireLongPress(int8_t /*btn*/) {
-    // Long-press behaviour is intentionally empty in the new layout — every
-    // adjustment is encoder-modal now, no held-button stepping. Reserved
-    // for future use (e.g. long-press a band tile to clear its stack memory).
+    // Long-press is now reserved — the 10m tile gesture is handled
+    // separately in handleTouch (red curtain → TEST mode). Title-bar
+    // touches open the persona menu via firePress, not long-press.
 }
 
 void handleTouch() {
@@ -1449,7 +1546,7 @@ void handleTouch() {
     // and commits to TEST mode when the wipe completes.  We just flip the
     // flag here so the wipe tick knows it's allowed to run.
     const int8_t kBtnTenM = (int8_t)(BTN_TILE_BASE + 9);   // 10m tile
-    if (currentMode == AetherPadMode::Normal
+    if (isNormalMode()
         && heldBtn == kBtnTenM
         && !gestureActive
         && (millis() - heldSince) >= GESTURE_DEAD_ZONE_MS) {
@@ -1814,6 +1911,189 @@ void drawStatic() {
     invalidateTileCache();
 }
 
+// ===========================================================================
+// Splash / persona menu — boot screen and re-openable via title-bar tap.
+// ===========================================================================
+static void drawSplashButton(int x, const char* label, uint16_t accent, bool highlight) {
+    // Background panel
+    tft.fillRoundRect(x, SPLASH_BTN_Y, SPLASH_BTN_W, SPLASH_BTN_H, 10,
+                      highlight ? C_PANEL : C_BG);
+    tft.drawRoundRect(x, SPLASH_BTN_Y, SPLASH_BTN_W, SPLASH_BTN_H, 10, accent);
+    if (highlight) {
+        tft.drawRoundRect(x + 2, SPLASH_BTN_Y + 2,
+                          SPLASH_BTN_W - 4, SPLASH_BTN_H - 4, 8, accent);
+    }
+    // Label centred
+    int textSize = 3;
+    int w = (int)strlen(label) * 6 * textSize;
+    int h = 8 * textSize;
+    tft.setTextColor(accent); tft.setTextSize(textSize);
+    tft.setCursor(x + (SPLASH_BTN_W - w) / 2,
+                  SPLASH_BTN_Y + (SPLASH_BTN_H - h) / 2);
+    tft.print(label);
+}
+
+void drawSplash() {
+    tft.fillScreen(C_BG);
+
+    // Title
+    const char* title = "aether-pad";
+    const int titleSize = 5;
+    int tw = (int)strlen(title) * 6 * titleSize;
+    tft.setTextColor(C_CYAN); tft.setTextSize(titleSize);
+    tft.setCursor((800 - tw) / 2, 30); tft.print(title);
+
+    // Subtitle: callsign + version + build date
+    const char* sub = "G0JKN/W3   -   persona menu";
+    const int subSize = 2;
+    int sw = (int)strlen(sub) * 6 * subSize;
+    tft.setTextColor(C_MUTED); tft.setTextSize(subSize);
+    tft.setCursor((800 - sw) / 2, 120); tft.print(sub);
+
+    // Three persona buttons. Highlight whichever is the current autoPick.
+    drawSplashButton(SPLASH_BTN_TCI_X,   "TCI",
+                     C_CYAN,
+                     g_splash.autoPick == AetherPadMode::NormalTci);
+    drawSplashButton(SPLASH_BTN_RC28_X,  "RC-28",
+                     C_AMBER,
+                     g_splash.autoPick == AetherPadMode::NormalRc28);
+    drawSplashButton(SPLASH_BTN_ACTRL_X, "AetherControl",
+                     C_GREEN,
+                     g_splash.autoPick == AetherPadMode::NormalAetherControl);
+
+    // Countdown line at the bottom (updated incrementally by splashTick)
+    g_splash.lastSecLeft = -1;     // force first draw
+
+    invalidateTileCache();
+}
+
+void splashTick() {
+    if (!g_splash.active) return;
+    if (!g_splash.armed) return;          // boot/WiFi phase — no countdown yet
+    unsigned long elapsed = millis() - g_splash.startMs;
+
+    // Auto-continue when timeout elapses
+    if (elapsed >= SPLASH_TIMEOUT_MS) {
+        AetherPadMode pick = g_splash.autoPick;
+        g_splash.active = false;
+        Serial.print("Splash: auto-continuing to ");
+        Serial.println(PERSONA_LABEL[(uint8_t)pick]);
+        switchToPersona(pick);
+        return;
+    }
+
+    // Countdown only changes once per second — only repaint when the
+    // visible integer flips, otherwise we waste a screen redraw 40x/sec.
+    int secLeft = (int)((SPLASH_TIMEOUT_MS - elapsed + 999) / 1000);
+    if (secLeft != g_splash.lastSecLeft) {
+        g_splash.lastSecLeft = secLeft;
+        // Wipe + redraw just the countdown strip at the bottom
+        tft.fillRect(0, 430, 800, 30, C_BG);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Auto-continue in %d  (tap a button to choose)", secLeft);
+        const int sz = 2;
+        int w = (int)strlen(buf) * 6 * sz;
+        tft.setTextColor(C_MUTED); tft.setTextSize(sz);
+        tft.setCursor((800 - w) / 2, 432); tft.print(buf);
+    }
+}
+
+// Paint a status string in the splash's bottom strip — used by wifiConnect()
+// to show "Connecting..." over the splash before the countdown is armed.
+void splashStatus(const char* msg, uint16_t fg) {
+    tft.fillRect(0, 430, 800, 30, C_BG);
+    const int sz = 2;
+    int w = (int)strlen(msg) * 6 * sz;
+    tft.setTextColor(fg); tft.setTextSize(sz);
+    tft.setCursor((800 - w) / 2, 432); tft.print(msg);
+}
+
+void splashHandleTouch() {
+    if (!g_splash.active) return;
+
+    static unsigned long lastTapMs = 0;
+    if (millis() - lastTapMs < 220) return;          // simple debounce
+
+    GDTpoint_t tp[5];
+    uint8_t n = Touch.getTouchPoints(tp);
+    if (n == 0) return;
+
+    int rx = tp[0].x, ry = tp[0].y;
+    int tx, ty;
+    switch (touchMode) {
+        case 1:  tx = 799 - ry; ty = rx;       break;
+        case 2:  tx = rx;       ty = ry;       break;
+        case 3:  tx = 799 - rx; ty = 479 - ry; break;
+        default: tx = ry;       ty = 479 - rx; break;
+    }
+
+    // Hit-test the three persona buttons
+    if (ty < SPLASH_BTN_Y || ty >= SPLASH_BTN_Y + SPLASH_BTN_H) return;
+
+    AetherPadMode pick;
+    if      (tx >= SPLASH_BTN_TCI_X   && tx < SPLASH_BTN_TCI_X   + SPLASH_BTN_W) pick = AetherPadMode::NormalTci;
+    else if (tx >= SPLASH_BTN_RC28_X  && tx < SPLASH_BTN_RC28_X  + SPLASH_BTN_W) pick = AetherPadMode::NormalRc28;
+    else if (tx >= SPLASH_BTN_ACTRL_X && tx < SPLASH_BTN_ACTRL_X + SPLASH_BTN_W) pick = AetherPadMode::NormalAetherControl;
+    else return;
+
+    lastTapMs = millis();
+    g_splash.active = false;
+    Serial.print("Splash: operator picked ");
+    Serial.println(PERSONA_LABEL[(uint8_t)pick]);
+    switchToPersona(pick);
+}
+
+void openSplash(bool autoToCurrent) {
+    g_splash.active      = true;
+    g_splash.armed       = true;          // timer runs immediately
+    g_splash.startMs     = millis();
+    g_splash.autoPick    = autoToCurrent ? currentMode : AetherPadMode::NormalTci;
+    g_splash.lastSecLeft = -1;
+    drawSplash();
+}
+
+// Boot-phase entry: splash drawn but timer disabled. Used so wifiConnect()
+// can show "Connecting..." over the splash without the countdown stealing
+// seconds during the WiFi associate.
+void openSplashBoot() {
+    g_splash.active      = true;
+    g_splash.armed       = false;
+    g_splash.autoPick    = AetherPadMode::NormalTci;
+    g_splash.lastSecLeft = -1;
+    drawSplash();
+}
+
+// Persona entry points. TCI is the historical default and stays wired
+// through the existing WiFi/TCI/drawDynamic path. RC-28 and AetherControl
+// are stubs at this layer — the persona switch logs the change to Serial;
+// actual USB-side enable/disable will land alongside the AetherControl
+// emitter once the AetherSDR alias path is settled.
+void tciResume() {
+    Serial.println("Persona: TCI (resumed)");
+}
+
+void rc28PersonaBegin() {
+    Serial.println("Persona: RC-28 (HID device already enumerated in Phase A)");
+}
+
+void aetherControlBegin() {
+    Serial.println("Persona: AetherControl (stub — USB CDC emitter not yet wired)");
+}
+
+void switchToPersona(AetherPadMode m) {
+    if ((uint8_t)m >= PERSONA_CAROUSEL_COUNT) return;   // ignore Test or out-of-range
+    Serial.print("switchToPersona: "); Serial.println(PERSONA_LABEL[(uint8_t)m]);
+    currentMode = m;
+    switch (m) {
+        case AetherPadMode::NormalTci:           tciResume();          break;
+        case AetherPadMode::NormalRc28:          rc28PersonaBegin();   break;
+        case AetherPadMode::NormalAetherControl: aetherControlBegin(); break;
+        default: break;
+    }
+    drawStatic();           // wipe the carousel frame, restore operator UI
+    uiNeedsRedraw = true;   // force drawDynamic on the next loop iteration
+}
+
 void drawButton(const Btn& b, uint16_t bg, uint16_t fg) {
     tft.fillRoundRect(b.x, b.y, b.w, b.h, 8, bg);
     tft.drawRoundRect(b.x, b.y, b.w, b.h, 8, C_BORDER);
@@ -2028,6 +2308,8 @@ static void drawTile(const Btn& b, const char* label, bool active) {
 void drawDynamic() {
     // TEST mode draws its own dynamic surface (status line refresh only).
     if (currentMode == AetherPadMode::Test) { drawTestDynamic(); return; }
+    // Splash / persona menu owns the screen while active.
+    if (g_splash.active) return;
 
     char buf[64];
 
