@@ -817,6 +817,17 @@ const int8_t BTN_TEST_E      = 24;
 const int8_t BTN_TEST_F      = 25;
 const int8_t BTN_TEST_RETURN = 26;
 
+// RC-28 persona button IDs (the three operator buttons on a real Icom RC-28).
+const int8_t BTN_RC28_F1     = 30;
+const int8_t BTN_RC28_F2     = 31;
+const int8_t BTN_RC28_TX     = 32;
+
+// AetherControl persona button IDs (the three Aux buttons in AE's popout —
+// host-side configurable, hardware just emits X1S/X2S/X3S).
+const int8_t BTN_ACTRL_AUX1  = 40;
+const int8_t BTN_ACTRL_AUX2  = 41;
+const int8_t BTN_ACTRL_AUX3  = 42;
+
 // TEST screen layout (800x480 landscape)
 struct TestRect { int x, y, w, h; };
 const TestRect TEST_BANNER       = {   0,   0, 800,  44 };
@@ -893,6 +904,199 @@ static void drawTestDynamic() {
     tft.setCursor(20, TEST_STATUS.y + 9);
     tft.print("Last sent: ");
     tft.print(gLastSent);
+}
+
+// ===========================================================================
+// RC-28 persona operator screen — the aether-pad pretending to be an Icom
+// RC-28 (a small puck with one knob + three function buttons: F1, F2, TX).
+// USB role-switching + HID emission live in a future phase; this is the
+// visual surface only. Taps update gRc28LastTap so the operator gets
+// immediate feedback that the touch registered, even though no event
+// leaves the device yet.
+// ===========================================================================
+struct PRect { int x, y, w, h; };
+
+const PRect RC28_FREQ_BAND   = {   0,  44, 800, 130 };   // big freq display
+const PRect RC28_BTN_F1_R    = {  60, 200, 200, 170 };
+const PRect RC28_BTN_F2_R    = { 300, 200, 200, 170 };
+const PRect RC28_BTN_TX_R    = { 540, 200, 200, 170 };
+const PRect RC28_STATUS_R    = {   0, 400, 800,  60 };
+
+static char gRc28LastTap[32]  = "ready";
+
+static inline bool inPRect(const PRect& r, int x, int y) {
+    return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+}
+
+// Filled-rect, persona-amber-outlined operator button.
+static void drawPersonaButton(const PRect& r, const char* label,
+                              uint16_t accent, uint16_t fg) {
+    tft.fillRoundRect(r.x, r.y, r.w, r.h, 12, C_PANEL);
+    tft.drawRoundRect(r.x, r.y, r.w, r.h, 12, accent);
+    tft.drawRoundRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, 11, accent);
+    int sz = 5;
+    int tw = (int)strlen(label) * 6 * sz;
+    int th = 8 * sz;
+    tft.setTextSize(sz); tft.setTextColor(fg);
+    tft.setCursor(r.x + (r.w - tw) / 2, r.y + (r.h - th) / 2);
+    tft.print(label);
+}
+
+static void drawRc28OperatorStatic() {
+    tft.fillScreen(C_BG);
+
+    // Title bar (amber-tinted, plus persona pill drawn by Dynamic pass).
+    tft.setTextColor(C_AMBER); tft.setTextSize(3);
+    tft.setCursor(8, 4); tft.print("AETHER_PAD");
+    tft.setTextColor(C_MUTED); tft.setTextSize(2);
+    tft.setCursor(220, 10); tft.print("G0JKN/W3");
+
+    // Three operator buttons. TX is red-tinted so the operator can't miss
+    // which one will key the radio when wired.
+    drawPersonaButton(RC28_BTN_F1_R, "F1", C_AMBER, C_AMBER);
+    drawPersonaButton(RC28_BTN_F2_R, "F2", C_AMBER, C_AMBER);
+    drawPersonaButton(RC28_BTN_TX_R, "TX", C_RED,   C_RED);
+}
+
+static void drawRc28OperatorDynamic() {
+    char buf[64];
+
+    // Persona pill (top-right) — same coords as the TCI persona's pill so
+    // it lives in the same spot regardless of which screen you're on.
+    tft.fillRect(586, 2, 100, 28, C_PANEL);
+    tft.drawRect(586, 2, 100, 28, C_AMBER);
+    tft.setTextColor(C_AMBER); tft.setTextSize(2);
+    const char* pillTxt = "RC-28";
+    int ppw = strlen(pillTxt) * 12;
+    tft.setCursor(586 + (100 - ppw) / 2, 8);
+    tft.print(pillTxt);
+
+    // Big frequency display. Sourced from st.freqHz (the TCI cache); will
+    // read 0 if TCI isn't connected, which is fine while USB-only operation
+    // hasn't been wired yet. When the HID path lands we'll switch this to
+    // mirror what was actually emitted.
+    formatFreq(st.freqHz, buf, sizeof(buf));
+    tft.fillRect(RC28_FREQ_BAND.x, RC28_FREQ_BAND.y,
+                 RC28_FREQ_BAND.w, RC28_FREQ_BAND.h, C_BG);
+    tft.setTextSize(7); tft.setTextColor(C_AMBER);
+    int fw = strlen(buf) * 42;       // 6*7 = 42 px per char at size 7
+    tft.setCursor((800 - fw) / 2, RC28_FREQ_BAND.y + 30);
+    tft.print(buf);
+
+    // Status line — last event + USB enumeration hint
+    tft.fillRect(RC28_STATUS_R.x, RC28_STATUS_R.y,
+                 RC28_STATUS_R.w, RC28_STATUS_R.h, C_PANEL);
+    tft.drawRect(RC28_STATUS_R.x, RC28_STATUS_R.y,
+                 RC28_STATUS_R.w, RC28_STATUS_R.h, C_BORDER);
+    tft.setTextSize(2); tft.setTextColor(C_MUTED);
+    tft.setCursor(20, RC28_STATUS_R.y + 12);
+    tft.print("Last: ");
+    tft.setTextColor(C_AMBER);
+    tft.print(gRc28LastTap);
+    tft.setTextColor(C_MUTED);
+    tft.setCursor(20, RC28_STATUS_R.y + 36);
+    tft.print("USB HID role-switching pending (Phase 4)");
+}
+
+// ===========================================================================
+// AetherControl persona operator screen — mirrors AE's FlexControl popout
+// (PR #2888): three LED indicator pills, three big Aux buttons, status
+// strip at the bottom. USB CDC + the I-back LED protocol land in a later
+// phase; this is the visual surface only.
+// ===========================================================================
+const PRect ACTRL_LED_MODE_R   = {  40,  60, 220,  50 };
+const PRect ACTRL_LED_ONOFF_R  = { 290,  60, 220,  50 };
+const PRect ACTRL_LED_TOGGLE_R = { 540,  60, 220,  50 };
+const PRect ACTRL_BTN_AUX1_R   = {  40, 140, 220, 170 };
+const PRect ACTRL_BTN_AUX2_R   = { 290, 140, 220, 170 };
+const PRect ACTRL_BTN_AUX3_R   = { 540, 140, 220, 170 };
+const PRect ACTRL_STATUS_R     = {   0, 330, 800, 140 };
+
+static char gACtrlLastTap[32]  = "ready";
+// Indicator LED states, driven by AetherSDR's I-back messages (I100;/I010;/
+// I001;/I000;). For now they default off and aren't driven by anything —
+// the visual is there so the layout is complete.
+static bool gACtrlLed[3] = { false, false, false };
+
+static void drawACtrlLedPill(const PRect& r, const char* label, bool lit) {
+    // Outlined pill. When lit, the LED dot on the left fills green; otherwise
+    // it shows as a dim circle outline.
+    tft.fillRoundRect(r.x, r.y, r.w, r.h, 10, C_PANEL);
+    tft.drawRoundRect(r.x, r.y, r.w, r.h, 10, C_BORDER);
+    int cx = r.x + 22, cy = r.y + r.h / 2;
+    if (lit) {
+        tft.fillCircle(cx, cy, 10, C_GREEN);
+    } else {
+        tft.drawCircle(cx, cy, 10, C_MUTED);
+    }
+    tft.setTextSize(2); tft.setTextColor(lit ? C_GREEN : C_MUTED);
+    tft.setCursor(r.x + 50, r.y + (r.h - 16) / 2);
+    tft.print(label);
+}
+
+static void drawACtrlStatic() {
+    tft.fillScreen(C_BG);
+
+    // Title bar (green-tinted, persona pill drawn by Dynamic).
+    tft.setTextColor(C_GREEN); tft.setTextSize(3);
+    tft.setCursor(8, 4); tft.print("AETHER_PAD");
+    tft.setTextColor(C_MUTED); tft.setTextSize(2);
+    tft.setCursor(220, 10); tft.print("G0JKN/W3");
+
+    // Three Aux buttons. Labels stay generic — AE configures what each
+    // does host-side, so the device has no way to know the assignments.
+    drawPersonaButton(ACTRL_BTN_AUX1_R, "Aux1", C_GREEN, C_GREEN);
+    drawPersonaButton(ACTRL_BTN_AUX2_R, "Aux2", C_GREEN, C_GREEN);
+    drawPersonaButton(ACTRL_BTN_AUX3_R, "Aux3", C_GREEN, C_GREEN);
+}
+
+static void drawACtrlDynamic() {
+    char buf[64];
+
+    // Persona pill
+    tft.fillRect(586, 2, 100, 28, C_PANEL);
+    tft.drawRect(586, 2, 100, 28, C_GREEN);
+    tft.setTextColor(C_GREEN); tft.setTextSize(2);
+    const char* pillTxt = "AeCtrl";
+    int ppw = strlen(pillTxt) * 12;
+    tft.setCursor(586 + (100 - ppw) / 2, 8);
+    tft.print(pillTxt);
+
+    // Three LED indicators (MODE / ON/OFF / TOGGLE). State lives in gACtrlLed[].
+    drawACtrlLedPill(ACTRL_LED_MODE_R,   "MODE",   gACtrlLed[0]);
+    drawACtrlLedPill(ACTRL_LED_ONOFF_R,  "ON/OFF", gACtrlLed[1]);
+    drawACtrlLedPill(ACTRL_LED_TOGGLE_R, "TOGGLE", gACtrlLed[2]);
+
+    // Status strip — WHEEL / SLICE / FREQUENCY / STEP in a 2×2 grid mirroring
+    // AE's popout. Frequency + step come from the TCI cache; wheel + slice
+    // are static placeholders until the CDC path lands.
+    tft.fillRect(ACTRL_STATUS_R.x, ACTRL_STATUS_R.y,
+                 ACTRL_STATUS_R.w, ACTRL_STATUS_R.h, C_BG);
+
+    const int col1X = 40, col2X = 420;
+    const int rowAY = 340, rowBY = 410;
+
+    tft.setTextSize(2); tft.setTextColor(C_MUTED);
+    tft.setCursor(col1X, rowAY);     tft.print("WHEEL");
+    tft.setCursor(col2X, rowAY);     tft.print("SLICE");
+    tft.setCursor(col1X, rowBY);     tft.print("FREQUENCY");
+    tft.setCursor(col2X, rowBY);     tft.print("STEP");
+
+    tft.setTextSize(3); tft.setTextColor(C_WHITE);
+    tft.setCursor(col1X, rowAY + 22); tft.print("Tune Slice");
+    tft.setCursor(col2X, rowAY + 22); tft.print("A");
+    formatFreq(st.freqHz, buf, sizeof(buf));
+    tft.setCursor(col1X, rowBY + 22); tft.print(buf);
+    if (vfoStepHz >= 1000) snprintf(buf, sizeof(buf), "%ld kHz", vfoStepHz / 1000);
+    else                   snprintf(buf, sizeof(buf), "%ld Hz",  vfoStepHz);
+    tft.setCursor(col2X, rowBY + 22); tft.print(buf);
+
+    // Last-tap toast — small line under the pill, only when not "ready"
+    if (strcmp(gACtrlLastTap, "ready") != 0) {
+        tft.fillRect(580, 32, 220, 18, C_BG);
+        tft.setTextSize(1); tft.setTextColor(C_GREEN);
+        tft.setCursor(580, 36); tft.print("Last: "); tft.print(gACtrlLastTap);
+    }
 }
 
 static void enterTestMode() {
@@ -1415,6 +1619,24 @@ static int8_t btnAtPoint(int x, int y) {
     if (currentMode == AetherPadMode::Test) return testBtnAtPoint(x, y);
 
     if (inBtn(btnFreqChip,  x, y)) return BTN_FREQ_CHIP;
+    // RC-28 persona: only the three function buttons are tappable (plus
+    // the title bar, handled at the bottom of this function).
+    if (currentMode == AetherPadMode::NormalRc28) {
+        if (inPRect(RC28_BTN_F1_R, x, y)) return BTN_RC28_F1;
+        if (inPRect(RC28_BTN_F2_R, x, y)) return BTN_RC28_F2;
+        if (inPRect(RC28_BTN_TX_R, x, y)) return BTN_RC28_TX;
+        if (y >= 0 && y < 30) return BTN_TITLE;
+        return BTN_NONE;
+    }
+    // AetherControl persona: three Aux buttons + title bar.
+    if (currentMode == AetherPadMode::NormalAetherControl) {
+        if (inPRect(ACTRL_BTN_AUX1_R, x, y)) return BTN_ACTRL_AUX1;
+        if (inPRect(ACTRL_BTN_AUX2_R, x, y)) return BTN_ACTRL_AUX2;
+        if (inPRect(ACTRL_BTN_AUX3_R, x, y)) return BTN_ACTRL_AUX3;
+        if (y >= 0 && y < 30) return BTN_TITLE;
+        return BTN_NONE;
+    }
+
     if (inBtn(btnVolChip,   x, y)) return BTN_VOL_CHIP;
     if (inBtn(btnModeChip,  x, y)) return BTN_MODE_CHIP;
     if (inBtn(btnStepChip,  x, y)) return BTN_STEP_CHIP;
@@ -1461,6 +1683,23 @@ static void firePress(int8_t btn) {
         exitTestMode();
         return;
     }
+    // RC-28 persona button taps — display-only for now (no HID emit until
+    // Phase 4). Update gRc28LastTap so the status line gives the operator
+    // immediate "yes that registered" feedback.
+    if (btn == BTN_RC28_F1) { snprintf(gRc28LastTap, sizeof(gRc28LastTap), "F1");
+                              uiNeedsRedraw = true; return; }
+    if (btn == BTN_RC28_F2) { snprintf(gRc28LastTap, sizeof(gRc28LastTap), "F2");
+                              uiNeedsRedraw = true; return; }
+    if (btn == BTN_RC28_TX) { snprintf(gRc28LastTap, sizeof(gRc28LastTap), "TX");
+                              uiNeedsRedraw = true; return; }
+    // AetherControl persona Aux button taps — display-only for now (no CDC
+    // emit until Phase 4).
+    if (btn == BTN_ACTRL_AUX1) { snprintf(gACtrlLastTap, sizeof(gACtrlLastTap), "Aux1 (X1S)");
+                                 uiNeedsRedraw = true; return; }
+    if (btn == BTN_ACTRL_AUX2) { snprintf(gACtrlLastTap, sizeof(gACtrlLastTap), "Aux2 (X2S)");
+                                 uiNeedsRedraw = true; return; }
+    if (btn == BTN_ACTRL_AUX3) { snprintf(gACtrlLastTap, sizeof(gACtrlLastTap), "Aux3 (X3S)");
+                                 uiNeedsRedraw = true; return; }
     if (btn >= BTN_TILE_BASE && btn < BTN_TILE_BASE + N_TILES) {
         firePressTile(btn - BTN_TILE_BASE);
         return;
@@ -1912,6 +2151,15 @@ void cmdIambicToggle() {
 void drawStatic() {
     // TEST mode owns the whole screen — divert.
     if (currentMode == AetherPadMode::Test) { drawTestStatic(); drawTestDynamic(); return; }
+    // RC-28 and AetherControl personas each have their own dedicated layout
+    // (parallel to TEST — paint static + dynamic, then return so the TCI
+    // operator UI further down doesn't render on top).
+    if (currentMode == AetherPadMode::NormalRc28) {
+        drawRc28OperatorStatic(); drawRc28OperatorDynamic(); return;
+    }
+    if (currentMode == AetherPadMode::NormalAetherControl) {
+        drawACtrlStatic(); drawACtrlDynamic(); return;
+    }
 
     tft.fillScreen(C_BG);
 
@@ -2339,6 +2587,14 @@ void drawDynamic() {
     if (currentMode == AetherPadMode::Test) { drawTestDynamic(); return; }
     // Splash / persona menu owns the screen while active.
     if (g_splash.active) return;
+    // Per-persona dynamic renderers — each persona's static was already drawn
+    // by drawStatic(); here we only refresh the bits that change.
+    if (currentMode == AetherPadMode::NormalRc28) {
+        drawRc28OperatorDynamic(); return;
+    }
+    if (currentMode == AetherPadMode::NormalAetherControl) {
+        drawACtrlDynamic(); return;
+    }
 
     char buf[64];
 
