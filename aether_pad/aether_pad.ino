@@ -84,7 +84,6 @@
 #include "Arduino_GigaDisplayTouch.h"
 #include "mdns_tci.h"
 #include "rc28_hid.h"
-#include <USB/PluggableUSBSerial.h>
 
 // USB HID device — impersonates Icom RC-28 for in-bench testing of
 // AetherSDR's IcomRC28Parser (PR ten9876/AetherSDR#2870). Enumerated at
@@ -93,27 +92,6 @@
 // leaves the device enumerated but silent so the host sees no spurious
 // tuning events while aether-pad is in everyday TCI use.
 AetherPad::Rc28Hid rc28;
-
-// Second CDC virtual-serial endpoint, dedicated to the AetherControl
-// protocol (PR ten9876/AetherSDR#2888). The Giga's default Serial is its
-// own USBSerial instance (`_SerialUSB`) used by the IDE Serial Monitor —
-// adding this one gives the host a *second* virtual COM port that we
-// reserve for the FlexControl-compatible protocol bytes (D;/U;/X1S;/S;/
-// etc going out, I100;/I010;/I001;/I000; coming back for the persona-
-// screen LEDs). Phase 4a wires it up + heartbeats; Phase 4c will layer
-// the actual protocol on top once we've confirmed the host sees both
-// virtual COMs in addition to the existing HID interface.
-//
-// The VID/PID/release args are *interface-level* identifiers — the Giga's
-// composite device-level VID/PID 0x2341:0x0266 is fixed by the mbed core
-// (see note in rc28_hid.cpp). connect_blocking=false so this constructor
-// doesn't stall boot if the host is slow to enumerate.
-arduino::USBSerial actrlSerial(/*connect_blocking=*/false,
-                               /*name=*/"AetherControl",
-                               /*vid=*/0x2341,
-                               /*pid=*/0x0270,    // Arduino + 1 above the RC-28 PID
-                               /*release=*/0x0001);
-static unsigned long actrlHeartbeatMs = 0;
 
 // ---------------------------------------------------------------------------
 // Build identification — printed at boot and in `?` output so you can
@@ -1230,11 +1208,6 @@ static void gestureWipeTick() {
 // ===========================================================================
 void setup() {
     Serial.begin(115200);
-    // Second CDC endpoint reserved for the AetherControl protocol. begin()
-    // is mostly ceremonial on USBSerial (baud isn't honoured over USB) but
-    // installs the rx_buffer + interrupt callback. No-op if the host hasn't
-    // opened the port yet.
-    actrlSerial.begin(115200);
     delay(400);
     Serial.println("\naether_pad — booting");
     Serial.print  ("Build: "); Serial.println(BUILD_TAG);
@@ -1294,25 +1267,6 @@ void loop() {
     handleSerial();
     drainEncoder();
     keyerTick();
-
-    // Phase 4a heartbeat: emit a single line on the AetherControl CDC port
-    // every 5 s while connected. Lets us confirm from a serial terminal on
-    // the host that the second virtual COM enumerates and is writable. The
-    // actual AetherControl protocol (D;/U;/X1S;/S; out, I100; etc in) lands
-    // in Phase 4c — for now this just proves the channel is alive.
-    if (actrlSerial.connected() && (millis() - actrlHeartbeatMs >= 5000)) {
-        actrlSerial.println("ACTRL_ALIVE;");
-        actrlHeartbeatMs = millis();
-    }
-    // Drain any inbound bytes on the AetherControl port so the rx_buffer
-    // doesn't overflow. Phase 4c will parse these — for now just discard
-    // and echo the count to debug Serial so we can see something is
-    // arriving from a `echo I100; > COMx` test on the host.
-    if (actrlSerial.available()) {
-        int n = 0;
-        while (actrlSerial.available()) { actrlSerial.read(); n++; }
-        Serial.print("ACTRL rx "); Serial.print(n); Serial.println(" bytes (discarded)");
-    }
 
     // Splash / persona menu owns the screen — bypass normal touch + draw
     // paths while it's up. Splash drives its own touch and countdown.
