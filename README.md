@@ -107,6 +107,12 @@ The board package pulls in the Display Shield libraries automatically:
 
 If any are missing, install them via **Sketch → Include Library → Manage Libraries…**
 
+> **⚠️ Pin `Arduino_GigaDisplay_GFX` to 1.0.0.** Version **1.1.0** produces a
+> **black screen** — the firmware runs fine (WiFi/TCI all work), but the display
+> init breaks against the stable Mbed Giga core's bundled `Arduino_H7_Video` 1.0.
+> In **Manage Libraries**, pick **1.0.0** from the version dropdown. If "Update all
+> libraries" ever bumps it to 1.1.0, just roll it back to 1.0.0 and re-flash.
+
 ### 3. Download the firmware
 
 Either clone the repo:

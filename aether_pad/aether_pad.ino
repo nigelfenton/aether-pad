@@ -1310,13 +1310,51 @@ void loop() {
 void wifiConnect() {
     // Status message goes into the splash's bottom strip — doesn't overlap
     // the persona buttons.
-    splashStatus("Connecting to WiFi...", C_CYAN);
+    //
+    // The Giga R1 WiFi occasionally wedges on connect; the old plain blocking
+    // wait (`while status != CONNECTED`) never cleared it, so the only recovery
+    // was a physical reset. Instead: bounded per-attempt wait, and after a few
+    // failures power-cycle the radio (disconnect/end → 3 s off → begin) and keep
+    // trying forever — a headless control surface must get itself back online
+    // unattended (e.g. after a power blip).
+    const uint32_t kAttemptMs        = 12000;   // wait up to 12 s per begin()
+    const uint8_t  kTriesBeforeReset = 3;       // hard radio reset after 3 fails
 
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    splashStatus("Connecting to WiFi...", C_CYAN);
     Serial.print("WiFi: ");
-    while (WiFi.status() != WL_CONNECTED) { delay(400); Serial.print("."); }
-    Serial.println();
-    Serial.print("WiFi connected, IP = "); Serial.println(WiFi.localIP());
+
+    uint8_t tries = 0;
+    for (;;) {
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
+        uint32_t t0 = millis();
+        while (WiFi.status() != WL_CONNECTED && (millis() - t0) < kAttemptMs) {
+            delay(250);
+            Serial.print(".");
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println();
+            Serial.print("WiFi connected, IP = "); Serial.println(WiFi.localIP());
+            splashStatus("WiFi connected", C_GREEN);
+            return;
+        }
+
+        tries++;
+        Serial.print(" attempt "); Serial.print(tries); Serial.println(" failed");
+        if (tries >= kTriesBeforeReset) {
+            // Hard reset the radio: off, wait 3 s, on, start the count over.
+            splashStatus("Resetting WiFi radio...", C_AMBER);
+            Serial.println("WiFi: cycling radio (off 3 s)");
+            WiFi.disconnect();
+            WiFi.end();
+            delay(3000);
+            tries = 0;
+            splashStatus("Connecting to WiFi...", C_CYAN);
+            Serial.print("WiFi: ");
+        } else {
+            splashStatus("WiFi retry...", C_CYAN);
+            delay(1000);
+        }
+    }
 }
 
 // ===========================================================================
