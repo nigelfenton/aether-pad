@@ -706,8 +706,18 @@ int  volumePercentFromDb(double db);
 // value is authoritative.
 unsigned long volEchoIgnoreUntil = 0;
 const unsigned long VOL_ECHO_IGNORE_MS = 1500;
+
+// Auto-release for the transient encoder targets. VOLUME has no natural
+// "finished" action the way MODE does — you stop turning and walk away — so an
+// idle timer stands in for one. Without it the knob silently stays on VOLUME,
+// and the next nudge meant for the VFO changes the audio instead.
+// ⚠ VFO and KEYER are deliberately NOT auto-released: VFO is the home target,
+// and a keyer left armed is the operator's explicit choice while sending.
+unsigned long encLastActivityMs = 0;
+const unsigned long ENC_AUTO_RELEASE_MS = 2000;
 void cmdBandSelect(int idx);
 void cmdEncoderTarget(EncoderTarget t);
+void encAutoReleaseTick();
 void cmdWpmStep(int dir);
 void cmdIambicToggle();
 int  bandIdxForFreq(long hz);
@@ -1288,6 +1298,7 @@ void loop() {
     handleSerial();
     drainEncoder();
     keyerTick();
+    encAutoReleaseTick();
 
     // Splash / persona menu owns the screen — bypass normal touch + draw
     // paths while it's up. Splash drives its own touch and countdown.
@@ -1731,7 +1742,14 @@ static void firePressTile(int idx) {
     const TileData& t   = row[idx];
     switch (t.action) {
         case ACT_BAND_SELECT: cmdBandSelect(t.arg);                  break;
-        case ACT_MODE_SET:    cmdModeStep(t.arg - st.modeIdx);       break;
+        case ACT_MODE_SET:
+            cmdModeStep(t.arg - st.modeIdx);
+            // Picking a mode from the tray IS the finish — there is nothing
+            // more to do with the encoder afterwards. Release the chip so the
+            // knob goes straight back to the VFO, rather than leaving MODE
+            // armed where an idle nudge would walk through modes unnoticed.
+            cmdEncoderTarget(TGT_VFO);
+            break;
         case ACT_WPM_SET:     cmdWpmStep(t.arg - cwWpm);             break;
         case ACT_IAMBIC_A:
             if (iambicMode != 'A') cmdIambicToggle();
@@ -2182,6 +2200,7 @@ void cmdVolStep(int dir) {
     snprintf(buf, sizeof(buf), "volume:%d;", volumeDbFromPercent(next));
     wsSendText(buf);
     volEchoIgnoreUntil = millis() + VOL_ECHO_IGNORE_MS;
+    encLastActivityMs  = millis();   // keeps the VOLUME chip armed while turning
     uiNeedsRedraw = true;
 }
 
@@ -2207,6 +2226,17 @@ const char* encTargetName(EncoderTarget t) {
     return "?";
 }
 
+// Release a transient encoder target once the operator has stopped using it, so
+// the knob returns to the VFO on its own. Only VOLUME qualifies: MODE releases
+// itself the moment a mode is picked, STEP is a deliberate setting the operator
+// leaves armed, and KEYER stays until they collapse it. VFO is home and never
+// auto-releases.
+void encAutoReleaseTick() {
+    if (encTarget != TGT_VOL) return;
+    if (millis() - encLastActivityMs < ENC_AUTO_RELEASE_MS) return;
+    cmdEncoderTarget(TGT_VFO);
+}
+
 void cmdEncoderTarget(EncoderTarget t) {
     // Toggle-tap: tapping an already-armed chip releases focus back to
     // the home target (VFO + BANDS tray). Lets the operator collapse
@@ -2217,6 +2247,8 @@ void cmdEncoderTarget(EncoderTarget t) {
         t = TGT_VFO;
     }
     encTarget = t;
+    encLastActivityMs = millis();   // arming counts as activity — see the
+                                    // auto-release tick in loop()
 
     // Bottom-row "tool tray" follows the armed chip — operator gets
     // both fine control (encoder spin) and coarse jump (tile tap) in
