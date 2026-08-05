@@ -1311,24 +1311,37 @@ void wifiConnect() {
     // Status message goes into the splash's bottom strip — doesn't overlap
     // the persona buttons.
     //
-    // The Giga R1 WiFi occasionally wedges on connect; the old plain blocking
-    // wait (`while status != CONNECTED`) never cleared it, so the only recovery
-    // was a physical reset. Instead: bounded per-attempt wait, and after a few
-    // failures power-cycle the radio (disconnect/end → 3 s off → begin) and keep
-    // trying forever — a headless control surface must get itself back online
-    // unattended (e.g. after a power blip).
-    const uint32_t kAttemptMs        = 12000;   // wait up to 12 s per begin()
-    const uint8_t  kTriesBeforeReset = 3;       // hard radio reset after 3 fails
+    // ⛔ DO NOT ADD WiFi.end() / WiFi.disconnect() RETRY LOGIC HERE.
+    //
+    // An earlier version did exactly that — bounded wait, then cycle the radio
+    // (disconnect/end → 3 s off → begin) on the theory that the Giga WiFi
+    // "occasionally wedges on connect". A later build made it more aggressive
+    // still, dropping the DHCP lease every attempt. The result, found on the
+    // bench 2026-08-05: the pad reached **attempt 110+** and had never once
+    // connected. Cycling the Giga's WiFi radio is not a recovery from the wedge
+    // — it is a reliable way to CAUSE it.
+    //
+    // ⭐ The evidence is the amp simulator on the same bench, same network, same
+    // board type, same SSID: it calls WiFi.begin() once, waits, and NEVER calls
+    // WiFi.end() or WiFi.disconnect() anywhere in the sketch. It connects first
+    // time, every time.
+    //
+    // So: begin() once, then wait patiently. Re-begin() only after a long
+    // timeout, and still never tear the radio down. A control surface that
+    // takes 30 s to appear after a power cut is fine; one that never appears
+    // is not.
+    const uint32_t kAttemptMs = 30000;   // 30 s of patience before re-begin()
 
     splashStatus("Connecting to WiFi...", C_CYAN);
     Serial.print("WiFi: ");
 
-    uint8_t tries = 0;
+    uint16_t tries = 0;
     for (;;) {
+        tries++;
         WiFi.begin(WIFI_SSID, WIFI_PASS);
         uint32_t t0 = millis();
         while (WiFi.status() != WL_CONNECTED && (millis() - t0) < kAttemptMs) {
-            delay(250);
+            delay(400);
             Serial.print(".");
         }
         if (WiFi.status() == WL_CONNECTED) {
@@ -1338,22 +1351,18 @@ void wifiConnect() {
             return;
         }
 
-        tries++;
-        Serial.print(" attempt "); Serial.print(tries); Serial.println(" failed");
-        if (tries >= kTriesBeforeReset) {
-            // Hard reset the radio: off, wait 3 s, on, start the count over.
-            splashStatus("Resetting WiFi radio...", C_AMBER);
-            Serial.println("WiFi: cycling radio (off 3 s)");
-            WiFi.disconnect();
-            WiFi.end();
-            delay(3000);
-            tries = 0;
-            splashStatus("Connecting to WiFi...", C_CYAN);
-            Serial.print("WiFi: ");
-        } else {
-            splashStatus("WiFi retry...", C_CYAN);
-            delay(1000);
-        }
+        // Still not up after 30 s. Say so, then simply ask again — no
+        // disconnect(), no end(), no lease drop. The radio stays initialised,
+        // which is the state it actually connects from.
+        Serial.print(" attempt "); Serial.print(tries); Serial.println(" — still trying");
+        splashStatus("WiFi: still trying...", C_AMBER);
+
+        // ⚠ If this never succeeds, suspect the WiFi FIRMWARE rather than this
+        // code: the Giga keeps its WiFi blob in external flash, and if that is
+        // missing or corrupt every connect fails identically. The mbed stack
+        // prints "Failed to mount the filesystem containing the WiFi firmware"
+        // / "Please run the WiFiFirmwareUpdater sketch once". Watch the serial
+        // console at boot for those before changing anything here.
     }
 }
 
