@@ -691,6 +691,21 @@ void cmdVfoDelta(long deltaHz);
 void cmdVfoStepCycle(int dir);
 void cmdModeStep(int dir);
 void cmdVolStep(int dir);
+// TCI volume is dB (-60..0), the pad's UI is 0-100 percent. Declared here
+// because the TCI receive handler converts on the way in, well above the
+// definitions.
+int  volumeDbFromPercent(int pct);
+int  volumePercentFromDb(double db);
+
+// ⛔ Ignore volume echoes for a moment after WE set it. TCI volume is integer
+// dB, which above ~55% is coarser than the pad's 5% detents: 95% -> 0 dB, and
+// converting 0 dB back gives 100%. So the radio's confirmation would drag the
+// display UP past what the operator selected, and the knob appeared to pin at
+// 100 turning clockwise while working normally anticlockwise. The echo is a
+// confirmation, not a correction — while the operator is turning, the pad's own
+// value is authoritative.
+unsigned long volEchoIgnoreUntil = 0;
+const unsigned long VOL_ECHO_IGNORE_MS = 1500;
 void cmdBandSelect(int idx);
 void cmdEncoderTarget(EncoderTarget t);
 void cmdWpmStep(int dir);
@@ -1634,16 +1649,21 @@ void parseTciMessage(const String& msg) {
                 }
             }
         } else if (name == "volume") {
-            // Legacy `volume:N;` notification — single arg, master/first slice
-            st.volume = args.toInt();
-            uiNeedsRedraw = true;
+            // `volume:N;` — master volume, in dB (-60..0), NOT percent. The
+            // pad's UI is 0-100, so convert on the way in as well as out;
+            // storing the raw dB here made the display read 0 at full audio.
+            // Skipped right after our own set — see volEchoIgnoreUntil.
+            if (millis() > volEchoIgnoreUntil) {
+                st.volume = volumePercentFromDb(args.toInt());
+                uiNeedsRedraw = true;
+            }
         } else if (name == "rx_volume") {
-            // `rx_volume:trx,value;` — per-receiver volume. Track trx 0 only.
+            // `rx_volume:trx,value;` — per-receiver volume, also in dB.
             int c1 = args.indexOf(','); if (c1 < 0) continue;
             int trx = args.substring(0, c1).toInt();
             int vol = args.substring(c1 + 1).toInt();
-            if (trx == 0) {
-                st.volume = vol;
+            if (trx == 0 && millis() > volEchoIgnoreUntil) {
+                st.volume = volumePercentFromDb(vol);
                 uiNeedsRedraw = true;
             }
         }
@@ -2111,6 +2131,30 @@ void cmdModeStep(int dir) {
     uiNeedsRedraw = true;
 }
 
+// TCI volume is dB (-60..0). These mirror AetherSDR's
+// TciProtocol::volumeDbFromPercent / volumePercentFromDb so the pad's 0-100 UI
+// lands on the same curve as the title-bar slider, rather than a second scale
+// that only agrees at the endpoints.
+int volumeDbFromPercent(int pct) {
+    if (pct <= 0)   return -60;
+    if (pct > 100)  pct = 100;
+    int db = (int)lround(20.0 * log10((double)pct / 100.0));
+    if (db < -60) db = -60;
+    if (db > 0)   db = 0;
+    return db;
+}
+
+int volumePercentFromDb(double db) {
+    if (db <= -60.0) return 0;
+    if (db > 0.0)    db = 0.0;
+    int pct = (int)lround(100.0 * pow(10.0, db / 20.0));
+    // Integer percent cannot resolve below -40 dB, so floor at 1: only the
+    // spec's explicit -60 silence point should read as mute.
+    if (pct < 1)   pct = 1;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
 void cmdVolStep(int dir) {
     int next = st.volume + dir * VOL_STEP;
     if (next < VOL_MIN) next = VOL_MIN;
@@ -2124,9 +2168,20 @@ void cmdVolStep(int dir) {
     // PcAudioEnabled). On older AetherSDR builds the pad volume will
     // appear to flicker but not change actual audio — flash a fixed
     // AetherSDR build to make the volume actually move.
+    // ⛔ TCI `volume:` IS IN dB (-60..0), NOT PERCENT. Sending 0-100 straight
+    // out is why the knob was unusable: every value above 0 clamps to 0 dB =
+    // full volume, so the whole 0-100 sweep collapsed into "silent, then loud"
+    // within a detent or two.
+    //
+    // Verified against the live radio 2026-08-05: AetherSDR answers `volume;`
+    // with `volume:0` at full audio, and converts with
+    // TciProtocol::volumeDbFromPercent() — 20*log10(pct/100), clamped to
+    // [-60, 0]. Mirror that exactly so the pad's 0-100 UI maps onto the same
+    // curve the AetherSDR title-bar slider uses.
     char buf[24];
-    snprintf(buf, sizeof(buf), "volume:%d;", next);
+    snprintf(buf, sizeof(buf), "volume:%d;", volumeDbFromPercent(next));
     wsSendText(buf);
+    volEchoIgnoreUntil = millis() + VOL_ECHO_IGNORE_MS;
     uiNeedsRedraw = true;
 }
 
