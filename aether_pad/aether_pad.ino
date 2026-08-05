@@ -126,8 +126,14 @@ const uint16_t  DISCOVERY_PORT      = 40002;
 const char*     DISCOVERY_PROBE     = "AETHERPAD?";
 const uint32_t  DISCOVERY_INTERVAL  = 2000;   // ms between probes while not connected
 const uint32_t  DISCOVERY_FALLBACK  = 5000;   // ms before falling back to hardcoded IP
-IPAddress       FALLBACK_HOST(10, 0, 0, 107);
-const uint16_t  FALLBACK_PORT       = 40001;
+// Used only if the UDP discovery probe goes unanswered. ⚠ Both of these had
+// drifted: .107 is a pre-DHCP address aurora13 no longer holds, and AetherSDR
+// listens on 50001, not the 40001 in the older docs. Verified live 2026-08-05 —
+// ws://10.0.0.104:50001 answers a TCI `start;` with vfo_limits/trx_count.
+// ⚠ DHCP moves aurora13, so treat this as a hint, not a fact: discovery is the
+// real mechanism and this is just what to try when nobody replies.
+IPAddress       FALLBACK_HOST(10, 0, 0, 104);
+const uint16_t  FALLBACK_PORT       = 50001;
 
 // VFO / encoder
 const int  ENC_PIN_A = 2;
