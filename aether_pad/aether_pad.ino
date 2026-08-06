@@ -46,8 +46,8 @@
  *   Bands     : 10 direct band tiles in 5×2 grid — TAP to jump to band's
  *                last-known frequency (RAM band-stack, sensible defaults).
  *                Active band (containing the current VFO) glows cyan.
- *                  [160m][80m][60m][40m][30m]
- *                  [ 20m][17m][15m][12m][10m]
+ *                  [160m][80m][40m][20m][15m]
+ *                  [ 10m][ 6m][ 2m][70cm][23cm]
  *   Encoder   : modal — VFO/VOL/MODE/STEP per active chip. Default boot
  *                target is VFO so out-of-the-box behaviour is unchanged.
  *
@@ -213,6 +213,20 @@ struct BandEntry {
     long        hiHz;     // band edge high
     long        lastHz;   // last operator frequency within this band
 };
+// VFO limits. Declared HERE, above every user — the TCI parse validates against
+// them, the encoder clamps to them, and the serial console checks them.
+//
+// The old ceiling was 60 MHz, hardcoded in three separate places, and it made
+// the pad unable to reach a VHF/UHF radio at all: an IC-9700 lives ENTIRELY
+// above it (2 m / 70 cm / 23 cm), so the knob stopped dead at 60.000 MHz.
+//
+// 1.3 GHz is the 9700's 23 cm top edge. NB `long` is 32-bit on the Giga —
+// signed max is 2147.5 MHz, so this fits with ~847 MHz to spare, but a future
+// ceiling above ~2.1 GHz would need int64_t here AND in st.freqHz, at the
+// atol() in the TCI parse, and in formatFreq().
+const long VFO_MIN_HZ =      100000L;   // 100 kHz
+const long VFO_MAX_HZ = 1300000000L;    // 1.3 GHz — IC-9700 23 cm top edge
+
 BandEntry bandStack[] = {
     {"160m",  1810000L,  2000000L,  1840000L},
     {"80m",   3500000L,  4000000L,  3700000L},
@@ -223,7 +237,15 @@ BandEntry bandStack[] = {
     {"17m",  18068000L, 18168000L, 18118000L},
     {"15m",  21000000L, 21450000L, 21250000L},
     {"12m",  24890000L, 24990000L, 24940000L},
-    {"10m",  28000000L, 29700000L, 28500000L}
+    {"10m",  28000000L, 29700000L, 28500000L},
+    // VHF and up. These are NOT in the touch UI's band-tile rows (which stay
+    // HF — see BAND_SELECT below); they are here so that VFO→band tracking,
+    // the band-name readout, and per-band lastHz memory all work when the
+    // operator tunes up here. An IC-9700 is only ever in this part of the list.
+    {"6m",   50000000L,  54000000L,  50150000L},
+    {"2m",  144000000L, 148000000L, 144200000L},
+    {"70cm",420000000L, 450000000L, 432100000L},
+    {"23cm",1240000000L,1300000000L,1296100000L}
 };
 const int N_BANDS = sizeof(bandStack) / sizeof(bandStack[0]);
 
@@ -484,8 +506,8 @@ struct Btn { int x, y, w, h; const char* lbl; };
 //   y= 36..100  big VFO frequency — tap to arm encoder for VFO
 //   y=104..184  three modal status chips (VOL · MODE · STEP) — tap to arm
 //   y=190..210  status text strip (band, encoder target, debug)
-//   y=216..340  band tiles row 1 (160 / 80 / 60 / 40 / 30)
-//   y=346..470  band tiles row 2 (20 / 17 / 15 / 12 / 10)
+//   y=216..340  band tiles row 1 (160 / 80 / 40 / 20 / 15)
+//   y=346..470  band tiles row 2 (10 / 6 / 2 / 70cm / 23cm)
 //
 // All four "chips" (the freq area + the three status cards) double as touch
 // targets that re-aim the encoder. The currently-armed chip glows cyan.
@@ -554,17 +576,26 @@ struct TileData {
 };
 
 // ROW_BANDS — index in bandStack[] is the arg
+//
+// TEN TILES, and bandStack[] now holds fourteen bands. 60m / 30m / 17m / 12m
+// have no tile so that 6m / 2m / 70cm / 23cm can have one: the pad could not
+// reach a VHF/UHF radio at all before (see VFO_MAX_HZ), and a radio like the
+// IC-9700 lives ENTIRELY in the four bands added here.
+//
+// The four dropped bands are NOT gone — they remain in bandStack[], so the
+// encoder still tunes into them, the band-name readout still names them, and
+// their per-band lastHz is still remembered. Only the one-touch tile is gone.
 static const TileData kBandData[10] = {
     {"160m", ACT_BAND_SELECT, 0},
     {"80m",  ACT_BAND_SELECT, 1},
-    {"60m",  ACT_BAND_SELECT, 2},
     {"40m",  ACT_BAND_SELECT, 3},
-    {"30m",  ACT_BAND_SELECT, 4},
     {"20m",  ACT_BAND_SELECT, 5},
-    {"17m",  ACT_BAND_SELECT, 6},
     {"15m",  ACT_BAND_SELECT, 7},
-    {"12m",  ACT_BAND_SELECT, 8},
-    {"10m",  ACT_BAND_SELECT, 9}
+    {"10m",  ACT_BAND_SELECT, 9},
+    {"6m",   ACT_BAND_SELECT, 10},
+    {"2m",   ACT_BAND_SELECT, 11},
+    {"70cm", ACT_BAND_SELECT, 12},
+    {"23cm", ACT_BAND_SELECT, 13}
 };
 
 // ROW_MODE — arg is the index into MODES[]
@@ -1644,7 +1675,13 @@ void parseTciMessage(const String& msg) {
             int trx  = args.substring(0, c1).toInt();
             int vfon = args.substring(c1 + 1, c2).toInt();
             long freq = atol(args.substring(c2 + 1).c_str());
-            if (trx == 0 && vfon == 0) {
+            // VALIDATE WHAT ARRIVES. atol() saturates at LONG_MAX on anything
+            // it cannot parse or that overflows, so a truncated or malformed
+            // frame used to be stored verbatim as 2147483647 Hz — displayed as
+            // "2147.483.647" with the band reading "?". Ignore it and keep the
+            // last good value rather than showing a frequency the radio is not
+            // on. (Observed live 2026-08-06.)
+            if (trx == 0 && vfon == 0 && freq >= VFO_MIN_HZ && freq <= VFO_MAX_HZ) {
                 st.freqHz = freq;
                 strncpy(st.bandName, freqToBand(freq), sizeof(st.bandName) - 1);
                 st.bandName[sizeof(st.bandName) - 1] = '\0';
@@ -2122,9 +2159,15 @@ int bandIdxForFreq(long hz) {
 }
 
 void cmdVfoDelta(long deltaHz) {
-    long target = st.freqHz + deltaHz;
-    if (target < 100000)     target = 100000;       // 100 kHz floor
-    if (target > 60000000UL) target = 60000000UL;   // 60 MHz ceiling
+    // CLAMP IN 64-BIT, then narrow. `st.freqHz + deltaHz` in 32-bit can WRAP
+    // before either bound is tested, and a wrapped value passes both: the pad
+    // was observed sitting at 2147483647 Hz (LONG_MAX) with the band reading
+    // "?", which is exactly what a saturated/overflowed add leaves behind.
+    // Doing the arithmetic wide makes the clamp the only thing that decides.
+    long long wide = (long long)st.freqHz + (long long)deltaHz;
+    if (wide < (long long)VFO_MIN_HZ) wide = VFO_MIN_HZ;
+    if (wide > (long long)VFO_MAX_HZ) wide = VFO_MAX_HZ;
+    long target = (long)wide;
     st.freqHz = target;
     strncpy(st.bandName, freqToBand(target), sizeof(st.bandName) - 1);
     st.bandName[sizeof(st.bandName) - 1] = '\0';
@@ -2900,6 +2943,14 @@ const char* freqToBand(long hz) {
     if (m >= 24890 && m <= 24990) return "12m";
     if (m >= 28000 && m <= 29700) return "10m";
     if (m >= 50000 && m <= 54000) return "6m";
+    // VHF/UHF/SHF. Without these the pad reads "?" for every frequency an
+    // IC-9700 can actually tune — the whole radio lives up here.
+    if (m >=  70000 && m <=  70500) return "4m";
+    if (m >= 144000 && m <= 148000) return "2m";
+    if (m >= 222000 && m <= 225000) return "1.25m";
+    if (m >= 420000 && m <= 450000) return "70cm";
+    if (m >= 902000 && m <= 928000) return "33cm";
+    if (m >= 1240000 && m <= 1300000) return "23cm";
     return "?";
 }
 
@@ -2976,7 +3027,10 @@ void handleSerial() {
     }
     if (line.startsWith("freq ")) {
         long v = atol(line.substring(5).c_str());
-        if (v >= 100000 && v <= 60000000L) {
+        // Same limits as the encoder path — a third hardcoded 60 MHz ceiling
+        // lived here, so `freq 144200000` was silently ignored by the console
+        // even once the knob could reach it.
+        if (v >= VFO_MIN_HZ && v <= VFO_MAX_HZ) {
             st.freqHz = v;
             strncpy(st.bandName, freqToBand(v), sizeof(st.bandName) - 1);
             char buf[40]; snprintf(buf, sizeof(buf), "vfo:0,0,%ld;", v);
