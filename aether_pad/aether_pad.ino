@@ -52,10 +52,10 @@
  *                target is VFO so out-of-the-box behaviour is unchanged.
  *
  * Network
- *   WiFi    : tinkerbell
+ *   WiFi    : SSID/password from arduino_secrets.h (untracked)
  *   Discovery (outbound, find AetherSDR):
  *              UDP probe "AETHERPAD?" → port 40002, listens for unicast reply
- *              "AETHERSDR ip=<addr> tci=<port>". Falls back to 10.0.0.107:40001
+ *              "AETHERSDR ip=<addr> tci=<port>". Falls back to the host in arduino_secrets.h
  *              after 5 s if no responder is on the LAN yet.
  *   Discovery (inbound, advertise self):
  *              mDNS / DNS-SD under _tci._tcp.local per
@@ -119,21 +119,28 @@ AetherPad::Rc28Hid rc28;
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const char* WIFI_SSID = "tinkerbell";
-const char* WIFI_PASS = "disneybell";
+// WiFi credentials and the fallback endpoint are site-specific and live in
+// arduino_secrets.h, which git ignores. Copy arduino_secrets.h.example.
+#if __has_include("arduino_secrets.h")
+  #include "arduino_secrets.h"
+#else
+  #error "Copy aether_pad/arduino_secrets.h.example to arduino_secrets.h and set your WiFi + AetherSDR host"
+#endif
+const char* WIFI_SSID = SECRET_SSID;
+const char* WIFI_PASS = SECRET_PASS;
 
 const uint16_t  DISCOVERY_PORT      = 40002;
 const char*     DISCOVERY_PROBE     = "AETHERPAD?";
 const uint32_t  DISCOVERY_INTERVAL  = 2000;   // ms between probes while not connected
 const uint32_t  DISCOVERY_FALLBACK  = 5000;   // ms before falling back to hardcoded IP
-// Used only if the UDP discovery probe goes unanswered. ⚠ Both of these had
-// drifted: .107 is a pre-DHCP address aurora13 no longer holds, and AetherSDR
-// listens on 50001, not the 40001 in the older docs. Verified live 2026-08-05 —
-// ws://10.0.0.104:50001 answers a TCI `start;` with vfo_limits/trx_count.
-// ⚠ DHCP moves aurora13, so treat this as a hint, not a fact: discovery is the
-// real mechanism and this is just what to try when nobody replies.
-IPAddress       FALLBACK_HOST(10, 0, 0, 104);
-const uint16_t  FALLBACK_PORT       = 50001;
+// Used only if the UDP discovery probe goes unanswered. Set in
+// arduino_secrets.h — it is a LAN lease, not a fact: this address has gone
+// stale repeatedly (.107, then .104 when the LAN left 10.0.0.x). The
+// discovery responder is not in upstream AetherSDR yet, so today this
+// fallback is the path that actually connects. AetherSDR's TCI default is
+// port 50001 (TciServer::start), not the 40001 in the older docs.
+IPAddress       FALLBACK_HOST(SECRET_FALLBACK_HOST);
+const uint16_t  FALLBACK_PORT       = SECRET_FALLBACK_PORT;
 
 // VFO / encoder
 const int  ENC_PIN_A = 2;
@@ -1454,7 +1461,7 @@ void discoveryTick() {
         int got = udp.read(buf, min(n, (int)sizeof(buf) - 1));
         buf[max(0, got)] = '\0';
         Serial.print("Discovery reply: "); Serial.println(buf);
-        // Expected: "AETHERSDR ip=10.0.0.107 tci=40001"
+        // Expected: "AETHERSDR ip=10.0.0.107 tci=50001"
         // IPAddress::fromString() rejects the trailing " tci=..." so we have
         // to chop the IP into its own NUL-terminated buffer first.
         char* ip = strstr(buf, "ip=");

@@ -21,3 +21,6 @@ Thumbs.db
 
 # Old design iterations the operator may want to drop later — keep them
 # tracked for now so the repo's history shows the case-design evolution.
+
+# Site-specific WiFi credentials + AetherSDR endpoint — never commit
+arduino_secrets.h

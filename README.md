@@ -76,9 +76,9 @@ Touch transform `tx = raw_y, ty = 479 - raw_x` is verified for landscape mountin
 
 ## Network
 
-- **WiFi SSID/pass** is hardcoded near the top of `aether_pad.ino` (`tinkerbell` by default — change to your shack network).
+- **WiFi SSID/pass** live in `aether_pad/arduino_secrets.h`, which git ignores (copy `arduino_secrets.h.example`).
 - **Discovery** broadcasts `AETHERPAD?` on the local /24 subnet, UDP port 40002. AetherSDR ≥ v0.9.5.1 (with the [TciServer responder patch](https://github.com/nigelfenton/AetherSDR)) replies unicast `AETHERSDR ip=<addr> tci=<port>`.
-- **Fallback** after 5 s without a reply: `10.0.0.107:40001`. Override at runtime with `ip <addr>` over serial.
+- **Fallback** after 5 s without a reply: the host and port set in `arduino_secrets.h` (AetherSDR's TCI default is port **50001**). The discovery responder is not in upstream AetherSDR yet, so the fallback is what connects today. Override at runtime with `ip <addr>` over serial.
 
 ## Install — build and flash the firmware
 
@@ -126,12 +126,19 @@ page and unzip it.
 
 ### 4. Set your WiFi credentials
 
-Open `aether_pad.ino` in the IDE and edit the two lines near the top:
+In the `aether_pad/` folder, copy `arduino_secrets.h.example` to
+`arduino_secrets.h` and edit it:
 
 ```cpp
-#define WIFI_SSID  "your-network"
-#define WIFI_PASS  "your-password"
+#define SECRET_SSID  "your-2.4GHz-ssid"
+#define SECRET_PASS  "your-wifi-password"
+
+#define SECRET_FALLBACK_HOST  192, 168, 1, 100   // the PC running AetherSDR
+#define SECRET_FALLBACK_PORT  50001
 ```
+
+`arduino_secrets.h` is in `.gitignore`, so your password stays out of git.
+The sketch refuses to compile, with a message saying so, until the file exists.
 
 The Giga's WiFi radio is **2.4 GHz only** — point it at your 2.4 GHz SSID,
 not a 5 GHz one.
@@ -167,9 +174,9 @@ Build: <date> <time>
 WiFi: ........
 WiFi connected, IP = 10.0.0.220
 Discovery probe → 10.0.0.255
-Discovery reply: AETHERSDR ip=10.0.0.107 tci=40001
-AetherSDR @ 10.0.0.107:40001
-TCI: connecting to 10.0.0.107:40001
+Discovery reply: AETHERSDR ip=10.0.0.107 tci=50001
+AetherSDR @ 10.0.0.107:50001
+TCI: connecting to 10.0.0.107:50001
 TCI: WebSocket handshake OK
 ```
 
@@ -187,7 +194,7 @@ once TCI is connected.
 - **WiFi never connects.** Double-check SSID/password spelling. Confirm
   you're on the 2.4 GHz SSID, not 5 GHz.
 - **TCI never connects.** In AetherSDR, open **Tools → TCI** and make
-  sure the TCI server is enabled on port **40001**. The Giga and the
+  sure the TCI server is enabled on port **50001** (the AetherSDR default). The Giga and the
   AetherSDR host need to be on the same LAN.
 
 ## Operating
@@ -300,7 +307,7 @@ All commands at **115200 8-N-1**.
 │  aether_pad ├───── discovery ───►│          │
 │   (Giga)    │◄──── reply ────────┤          │
 │             │                    │ AetherSDR│
-│             │   WS TCI :40001    │          │
+│             │   WS TCI :50001    │          │
 │             ├────────────────────►          │
 │             │◄────── echoes ─────┤          │
 └─┬─┬─┬─┬─────┘                    └──────────┘
