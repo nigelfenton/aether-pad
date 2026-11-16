@@ -1659,7 +1659,16 @@ void wsParseIncoming() {
 
 void parseTciMessage(const String& msg) {
     // Skip the high-rate noise (200ms broadcasts) so the log stays useful.
-    if (!msg.startsWith("rx_smeter") && !msg.startsWith("tx_") &&
+    // rx_filter_band: AetherSDR re-sends it unchanged about twice a second
+    // (seen 2026-11-15, FM on 2m), so log it only when the value changes.
+    static String lastFilterBand;
+    bool repeatFilter = false;
+    if (msg.startsWith("rx_filter_band")) {
+        repeatFilter = (msg == lastFilterBand);
+        lastFilterBand = msg;
+    }
+    if (!repeatFilter &&
+        !msg.startsWith("rx_smeter") && !msg.startsWith("tx_") &&
         !msg.startsWith("vox") && !msg.startsWith("mic_")) {
         Serial.print("TCI← "); Serial.println(msg);
     }
