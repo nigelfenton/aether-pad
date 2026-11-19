@@ -82,6 +82,7 @@
 #include "Arduino_H7_Video.h"
 #include "Arduino_GigaDisplay_GFX.h"
 #include "Arduino_GigaDisplayTouch.h"
+#include "logo_signal_ring.h"   // splash logo, 96x96 RGB565
 #include "mdns_tci.h"
 #include "rc28_hid.h"
 
@@ -2410,12 +2411,16 @@ static void drawSplashButton(int x, const char* label, uint16_t accent, bool hig
 void drawSplash() {
     tft.fillScreen(C_BG);
 
-    // Title
+    // Logo + title, centred as one group: the G0JKN signal-ring aether-pad mark
+    // (logo_signal_ring.h) to the left of the name, both centred on the title line.
     const char* title = "aether-pad";
     const int titleSize = 5;
     int tw = (int)strlen(title) * 6 * titleSize;
+    const int logoGap = 22;
+    int groupX = (800 - (LOGO_W + logoGap + tw)) / 2;
+    tft.drawRGBBitmap(groupX, 6, LOGO_RGB565, LOGO_W, LOGO_H);
     tft.setTextColor(C_CYAN); tft.setTextSize(titleSize);
-    tft.setCursor((800 - tw) / 2, 30); tft.print(title);
+    tft.setCursor(groupX + LOGO_W + logoGap, 6 + (LOGO_H - 8 * titleSize) / 2); tft.print(title);
 
     // Subtitle: callsign + version + build date
     const char* sub = "G0JKN/W3   -   persona menu";
